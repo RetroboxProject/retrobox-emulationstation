@@ -1,0 +1,291 @@
+diff --git a/es-app/CMakeLists.txt b/es-app/CMakeLists.txt
+index caaf9c6..0499263 100644
+--- a/es-app/CMakeLists.txt
++++ b/es-app/CMakeLists.txt
+@@ -136,10 +136,12 @@ set(ES_HEADERS
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/ZaparooSupport.h
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/LibretroRatio.h # batocera
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/Win32ApiSystem.h # batocera
++    ${CMAKE_CURRENT_SOURCE_DIR}/src/RetroboxMenuTheme.h # retrobox
+ )
+ 
+ set(ES_SOURCES
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/FileData.cpp
++    ${CMAKE_CURRENT_SOURCE_DIR}/src/RetroboxMenuTheme.cpp # retrobox
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/FileTag.cpp
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/FileSorts.cpp
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
+diff --git a/es-app/src/FileData.cpp b/es-app/src/FileData.cpp
+index a660db3..129e505 100644
+--- a/es-app/src/FileData.cpp
++++ b/es-app/src/FileData.cpp
+@@ -35,6 +35,7 @@
+ #include "resources/TextureData.h"
+ #include "views/gamelist/GameNameFormatter.h"
+ #include "watchers/WatchersManager.h"
++#include "RetroboxMenuTheme.h"
+ 
+ using namespace Utils::Platform;
+ 
+@@ -714,6 +715,9 @@ bool FileData::launchGame(Window* window, LaunchGameOptions options)
+ 	if (command.empty())
+ 		return false;
+ 
++	// Retrobox: the in-game overlay draws its menu like ours
++	RetroboxMenuTheme::exportForLaunch();
++
+ 	AudioManager::getInstance()->deinit();
+ 	VolumeControl::getInstance()->deinit();
+ 
+diff --git a/es-app/src/RetroboxMenuTheme.cpp b/es-app/src/RetroboxMenuTheme.cpp
+new file mode 100644
+index 0000000..ff8ce1d
+--- /dev/null
++++ b/es-app/src/RetroboxMenuTheme.cpp
+@@ -0,0 +1,223 @@
++#include "RetroboxMenuTheme.h"
++
++#include "Log.h"
++#include "Settings.h"
++#include "SystemConf.h"
++#include "ThemeData.h"
++#include "renderers/Renderer.h"
++#include "resources/Font.h"
++#include "resources/ResourceManager.h"
++#include "utils/FileSystemUtil.h"
++
++#include <rapidjson/prettywriter.h>
++#include <rapidjson/stringbuffer.h>
++
++#include <cstdio>
++#include <cstdlib>
++#include <fstream>
++
++namespace
++{
++	const char* ENV_VARIABLE = "RETROBOX_ES_MENU_THEME";
++	const int FORMAT_VERSION = 1;
++
++	typedef rapidjson::PrettyWriter<rapidjson::StringBuffer> Writer;
++
++	// ":/" paths live in EmulationStation's resources: give the real file
++	std::string realPath(const std::string& path)
++	{
++		if (path.empty())
++			return path;
++
++		return ResourceManager::getInstance()->getResourcePath(path);
++	}
++
++	std::string hexColor(unsigned int color)
++	{
++		char buffer[9];
++		snprintf(buffer, sizeof(buffer), "%08X", color);
++		return buffer;
++	}
++
++	void writeString(Writer& writer, const char* key, const std::string& value)
++	{
++		writer.Key(key);
++		writer.String(value.c_str());
++	}
++
++	void writeColor(Writer& writer, const char* key, unsigned int color)
++	{
++		writeString(writer, key, hexColor(color));
++	}
++
++	void writePath(Writer& writer, const char* key, const std::string& path)
++	{
++		writeString(writer, key, realPath(path));
++	}
++
++	void writePair(Writer& writer, const char* key, const Vector2f& pair)
++	{
++		writer.Key(key);
++		writer.StartArray();
++		writer.Double(pair.x());
++		writer.Double(pair.y());
++		writer.EndArray();
++	}
++
++	void writeFont(Writer& writer, const std::shared_ptr<Font>& font)
++	{
++		writer.Key("font");
++		writer.StartObject();
++		if (font != nullptr)
++		{
++			writePath(writer, "path", font->getPath());
++			writer.Key("size");
++			writer.Int(font->getSize());
++			writer.Key("height");
++			writer.Double(font->getHeight());
++			writer.Key("letterHeight");
++			writer.Double(font->getLetterHeight());
++		}
++		writer.EndObject();
++	}
++
++	void writeElement(Writer& writer, const char* key, const MenuElement& element)
++	{
++		writer.Key(key);
++		writer.StartObject();
++		writeFont(writer, element.font);
++		writeColor(writer, "color", element.color);
++		writeColor(writer, "selectedColor", element.selectedColor);
++		writeColor(writer, "selectorColor", element.selectorColor);
++		writeColor(writer, "selectorColorEnd", element.selectorGradientColor);
++		// ThemeMenu stores "true" for anything but "horizontal"
++		writeString(writer, "selectorGradientType", element.selectorGradientType ? "vertical" : "horizontal");
++		writeColor(writer, "separatorColor", element.separatorColor);
++		writer.EndObject();
++	}
++
++	void writeBackground(Writer& writer, const MenuBackground& background)
++	{
++		writer.Key("background");
++		writer.StartObject();
++		writeColor(writer, "color", background.color);
++		writeColor(writer, "centerColor", background.centerColor);
++		writePath(writer, "path", background.path);
++		writePath(writer, "fadePath", background.fadePath);
++		writePair(writer, "cornerSize", background.cornerSize);
++		writeColor(writer, "scrollbarColor", background.scrollbarColor);
++		writer.Key("scrollbarSize");
++		writer.Double(background.scrollbarSize);
++		writer.Key("scrollbarCorner");
++		writer.Double(background.scrollbarCorner);
++		writeString(writer, "scrollbarAlignment", background.scrollbarAlignment);
++		writer.EndObject();
++	}
++
++	void writeGroup(Writer& writer, const MenuGroupElement& group)
++	{
++		writer.Key("group");
++		writer.StartObject();
++		writeFont(writer, group.font);
++		writeColor(writer, "color", group.color);
++		writeColor(writer, "backgroundColor", group.backgroundColor);
++		writeColor(writer, "separatorColor", group.separatorColor);
++		writer.Key("lineSpacing");
++		writer.Double(group.lineSpacing);
++		writeString(writer, "alignment",
++			group.alignment == ALIGN_CENTER ? "center" : group.alignment == ALIGN_RIGHT ? "right" : "left");
++		writer.Key("visible");
++		writer.Bool(group.visible);
++		writer.EndObject();
++	}
++
++	void writeIcons(Writer& writer, const ThemeData::ThemeMenu& menu)
++	{
++		writer.Key("icons");
++		writer.StartObject();
++		writePath(writer, "on", menu.Icons.on);
++		writePath(writer, "off", menu.Icons.off);
++		writePath(writer, "arrow", menu.Icons.arrow);
++		writePath(writer, "optionArrow", menu.Icons.option_arrow);
++		writePath(writer, "knob", menu.Icons.knob);
++		writer.EndObject();
++
++		writer.Key("button");
++		writer.StartObject();
++		writePath(writer, "path", menu.Button.path);
++		writePath(writer, "filledPath", menu.Button.filledPath);
++		writePair(writer, "cornerSize", menu.Button.cornerSize);
++		writer.EndObject();
++	}
++
++	void writeSettings(Writer& writer)
++	{
++		writer.Key("screen");
++		writer.StartObject();
++		writer.Key("width");
++		writer.Int(Renderer::getScreenWidth());
++		writer.Key("height");
++		writer.Int(Renderer::getScreenHeight());
++		writer.EndObject();
++
++		writeString(writer, "themeSet", Settings::getInstance()->getString("ThemeSet"));
++		writeString(writer, "language", SystemConf::getInstance()->get("system.language"));
++		writer.Key("fullScreenMenus");
++		writer.Bool(Renderer::ScreenSettings::fullScreenMenus());
++		writer.Key("menuFontScale");
++		writer.Double(Renderer::ScreenSettings::menuFontScale());
++		writer.Key("invertButtons");
++		writer.Bool(Settings::getInstance()->getBool("InvertButtons"));
++		writer.Key("clock12h");
++		writer.Bool(Settings::getInstance()->getBool("ClockMode12"));
++	}
++
++	// write next to the target, then rename: readers never see half a file
++	bool writeAtomically(const std::string& path, const std::string& content)
++	{
++		const std::string tmp = path + ".tmp";
++		{
++			std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
++			if (!out)
++				return false;
++			out << content;
++			if (!out)
++				return false;
++		}
++		return std::rename(tmp.c_str(), path.c_str()) == 0;
++	}
++}
++
++void RetroboxMenuTheme::exportForLaunch()
++{
++	const char* target = std::getenv(ENV_VARIABLE);
++	if (target == nullptr || target[0] == '\0')
++		return;
++
++	const auto& menu = ThemeData::getMenuTheme();
++	if (menu == nullptr)
++		return;
++
++	rapidjson::StringBuffer buffer;
++	Writer writer(buffer);
++
++	writer.StartObject();
++	writer.Key("version");
++	writer.Int(FORMAT_VERSION);
++	writeSettings(writer);
++	writeBackground(writer, menu->Background);
++	writeElement(writer, "title", menu->Title);
++	writeElement(writer, "text", menu->Text);
++	writeElement(writer, "textSmall", menu->TextSmall);
++	writeElement(writer, "footer", menu->Footer);
++	writeGroup(writer, menu->Group);
++	writeIcons(writer, *menu);
++	writer.EndObject();
++
++	const std::string path(target);
++	Utils::FileSystem::createDirectory(Utils::FileSystem::getParent(path));
++	if (!writeAtomically(path, buffer.GetString()))
++	{
++		LOG(LogWarning) << "Retrobox: cannot write the menu theme to " << path;
++	}
++}
+diff --git a/es-app/src/RetroboxMenuTheme.h b/es-app/src/RetroboxMenuTheme.h
+new file mode 100644
+index 0000000..944b1e3
+--- /dev/null
++++ b/es-app/src/RetroboxMenuTheme.h
+@@ -0,0 +1,17 @@
++#pragma once
++#ifndef ES_APP_RETROBOX_MENU_THEME_H
++#define ES_APP_RETROBOX_MENU_THEME_H
++
++// Retrobox: export of the resolved menu theme for the in-game overlay.
++//
++// When the RETROBOX_ES_MENU_THEME environment variable names a file, every
++// game launch writes there, as JSON, the menu style EmulationStation is
++// drawing with: the active theme's menu elements once includes, variables,
++// subsets and the user's theme choices are applied, with absolute paths and
++// font sizes in pixels. Without the variable nothing is written.
++namespace RetroboxMenuTheme
++{
++	void exportForLaunch();
++}
++
++#endif // ES_APP_RETROBOX_MENU_THEME_H
