@@ -147,7 +147,9 @@ jobs:
 
       # The secret is masked as a whole by GitHub; mask its two values too, in
       # case a compiler error prints the command line with the login in it.
+      # Steps of a container job run with sh by default, and this one needs bash.
       - name: Mask the ScreenScraper login
+        shell: bash
         env:
           SCREENSCRAPER_DEV_LOGIN: ${{ secrets.SCREENSCRAPER_DEV_LOGIN }}
         run: |

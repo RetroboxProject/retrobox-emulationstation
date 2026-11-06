@@ -1,0 +1,111 @@
+diff --git a/es-app/src/ApiSystem.cpp b/es-app/src/ApiSystem.cpp
+index 6a9e796..614c05a 100644
+--- a/es-app/src/ApiSystem.cpp
++++ b/es-app/src/ApiSystem.cpp
+@@ -50,6 +50,25 @@
+ #include <arpa/inet.h>
+ #endif
+ 
++// Retrobox keeps its scripts in its own tree, not in /usr/bin: retrobox-core
++// exports RETROBOX_ROOTDIR (and installs to /opt/retrobox by default).
++static std::string retroboxScript(const std::string& name)
++{
++	const char* root = getenv("RETROBOX_ROOTDIR");
++	return std::string(root != nullptr && *root != '\0' ? root : "/opt/retrobox") + "/bin/" + name;
++}
++
++// The 7-Zip command line tool goes by different names: 7zr (p7zip, 7zip in Debian),
++// 7za (p7zip), 7zz (7zip in Fedora) or 7z.
++static std::string findSevenZip()
++{
++	for (const char* name : { "7zr", "7za", "7zz", "7z" })
++		if (Utils::FileSystem::exists(std::string("/usr/bin/") + name))
++			return name;
++
++	return "";
++}
++
+ /*
+ #define script_config "batocera-config"; // canupdate, overscan enable, overscan disable, storage 'X', storage current, storage list, forgetBT, getRootPassword, lsoutputs
+ #define script_overclock "batocera-overclock"; // list, set X
+@@ -2295,8 +2314,20 @@ bool ApiSystem::isScriptingSupported(ScriptId script)
+ 		return true;
+ 
+ 	for (auto executable : executables)
+-		if (!Utils::FileSystem::exists("/usr/bin/" + executable))
++	{
++		if (executable == "batocera-store")
++		{
++			if (!Utils::FileSystem::exists(retroboxScript("retrobox-store")))
++				return false;
++		}
++		else if (executable == "7zr")
++		{
++			if (findSevenZip().empty())
++				return false;
++		}
++		else if (!Utils::FileSystem::exists("/usr/bin/" + executable))
+ 			return false;
++	}
+ 
+ 	return true;
+ }
+@@ -2481,7 +2512,7 @@ std::vector<PacmanPackage> ApiSystem::getBatoceraStorePackages()
+ 
+ 	LOG(LogDebug) << "ApiSystem::getBatoceraStorePackages";
+ 
+-	auto res = executeEnumerationScript("batocera-store list");
++	auto res = executeEnumerationScript("\"" + retroboxScript("retrobox-store") + "\" list");
+ 	std::string data = Utils::String::join(res, "\n");
+ 	if (data.empty())
+ 	{
+@@ -2550,18 +2581,18 @@ std::vector<PacmanPackage> ApiSystem::getBatoceraStorePackages()
+ 
+ std::pair<std::string, int> ApiSystem::installBatoceraStorePackage(std::string name, const std::function<void(const std::string)>& func)
+ {
+-	return executeScript("batocera-store install \"" + name + "\"", func);
++	return executeScript("\"" + retroboxScript("retrobox-store") + "\" install \"" + name + "\"", func);
+ }
+ 
+ std::pair<std::string, int> ApiSystem::uninstallBatoceraStorePackage(std::string name, const std::function<void(const std::string)>& func)
+ {
+-	return executeScript("batocera-store remove \"" + name + "\"", func);
++	return executeScript("\"" + retroboxScript("retrobox-store") + "\" remove \"" + name + "\"", func);
+ }
+ 
+ void ApiSystem::refreshBatoceraStorePackageList()
+ {
+-	executeScript("batocera-store refresh");
+-	executeScript("batocera-store clean-all");
++	executeScript("\"" + retroboxScript("retrobox-store") + "\" refresh");
++	executeScript("\"" + retroboxScript("retrobox-store") + "\" clean-all");
+ }
+ 
+ void ApiSystem::callBatoceraPreGameListsHook()
+@@ -2571,7 +2602,12 @@ void ApiSystem::callBatoceraPreGameListsHook()
+ 
+ void ApiSystem::updateBatoceraStorePackageList()
+ {
+-	executeScript("batocera-store update");
++	executeScript("\"" + retroboxScript("retrobox-store") + "\" update");
++}
++
++std::string ApiSystem::getSevenZipCommand()
++{
++	return findSevenZip();
+ }
+ 
+ std::vector<std::string> ApiSystem::getShaderList(const std::string& systemName, const std::string& emulator, const std::string& core)
+diff --git a/es-app/src/ApiSystem.h b/es-app/src/ApiSystem.h
+index e1a1312..05e5057 100644
+--- a/es-app/src/ApiSystem.h
++++ b/es-app/src/ApiSystem.h
+@@ -373,7 +373,7 @@ public:
+ 	virtual std::vector<std::string> getRetroachievementsSoundsList();
+ 	virtual std::vector<std::string> getVideoFilterList(const std::string& systemName, const std::string& emulator, const std::string& core);
+ 	virtual std::vector<std::string> getShaderList(const std::string& systemName, const std::string& emulator, const std::string& core);
+-	virtual std::string getSevenZipCommand() { return "7zr"; }
++	virtual std::string getSevenZipCommand();
+ 
+ 	virtual std::vector<std::string> getTimezones();
+ 	virtual std::string getCurrentTimezone();

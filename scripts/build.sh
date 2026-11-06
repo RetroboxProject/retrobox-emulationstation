@@ -35,13 +35,23 @@ export CXXFLAGS="${CXXFLAGS:+${CXXFLAGS} }${MARCH_FLAGS}"
 # --- ScreenScraper -------------------------------------------------------------
 ss_args=()
 if [[ -n "${SCREENSCRAPER_DEV_LOGIN:-}" ]]; then
-    # Validate the shape without ever printing the value.
-    if [[ ! "${SCREENSCRAPER_DEV_LOGIN}" =~ ^devid=[^\&]+\&devpassword=[^\&]+$ ]]; then
-        echo "build.sh: SCREENSCRAPER_DEV_LOGIN must look like devid=<id>&devpassword=<password>" >&2
+    # A value pasted into a web form often carries a trailing newline or
+    # spaces, which would end up inside the compiled string: trim them.
+    login="${SCREENSCRAPER_DEV_LOGIN}"
+    login="${login#"${login%%[![:space:]]*}"}"
+    login="${login%"${login##*[![:space:]]}"}"
+    # Validate the shape without ever printing the value: the diagnostics only
+    # say what is wrong with its structure.
+    if [[ ! "${login}" =~ ^devid=[^\&[:space:]]+\&devpassword=[^\&[:space:]]+$ ]]; then
+        echo "build.sh: SCREENSCRAPER_DEV_LOGIN must look like devid=<id>&devpassword=<password> (nothing else, no spaces)" >&2
+        [[ "${login}" == devid=* ]] || echo "build.sh:   it does not start with 'devid='" >&2
+        [[ "${login}" == *'&devpassword='* ]] || echo "build.sh:   it has no '&devpassword=' part" >&2
+        separators="${login//[^&]/}"
+        echo "build.sh:   it has ${#separators} '&' separator(s); exactly 1 is expected" >&2
         exit 1
     fi
     ss_args=(
-        "-DSCREENSCRAPER_DEV_LOGIN=${SCREENSCRAPER_DEV_LOGIN}"
+        "-DSCREENSCRAPER_DEV_LOGIN=${login}"
         "-DSCREENSCRAPER_SOFTNAME=${SCREENSCRAPER_SOFTNAME:-Retrobox-Emulationstation}"
     )
     echo "build.sh: ScreenScraper support: ON (softname ${SCREENSCRAPER_SOFTNAME:-Retrobox-Emulationstation})"
