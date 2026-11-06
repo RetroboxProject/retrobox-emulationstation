@@ -77,7 +77,7 @@ its own is plain EmulationStation and keeps its data in `~/.emulationstation`.
 | `0003` | Null-safety for the gamelist cursor |
 | `0004` | Shutdown/reboot through KDE |
 | `0005` | Take the executable path from `/proc/self/exe`, so the symlink in `/usr/bin` finds `resources/` and `locale/` |
-| `0006` | With `RETROBOX_ES_MENU_THEME` set to a file, write there on every game launch the resolved menu theme (colours, fonts with their pixel sizes, background, icons, plus language and button settings) as JSON, for `retrobox-overlay` |
+| `0006` | With `RETROBOX_ES_MENU_THEME` set to a file, write there on every game launch the resolved menu theme (colours, fonts with their pixel sizes, background, icons, the help prompts' style and icons, plus language and button settings) as JSON, for `retrobox-overlay` |
 
 They are split by topic so that when upstream drifts, the one that fails
 tells you where to look.

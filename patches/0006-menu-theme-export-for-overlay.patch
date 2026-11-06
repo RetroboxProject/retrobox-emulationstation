@@ -39,12 +39,14 @@ index a660db3..129e505 100644
  
 diff --git a/es-app/src/RetroboxMenuTheme.cpp b/es-app/src/RetroboxMenuTheme.cpp
 new file mode 100644
-index 0000000..ff8ce1d
+index 0000000..45b278a
 --- /dev/null
 +++ b/es-app/src/RetroboxMenuTheme.cpp
-@@ -0,0 +1,223 @@
+@@ -0,0 +1,284 @@
 +#include "RetroboxMenuTheme.h"
 +
++#include "HelpStyle.h"
++#include "InputConfig.h"
 +#include "Log.h"
 +#include "Settings.h"
 +#include "SystemConf.h"
@@ -195,6 +197,64 @@ index 0000000..ff8ce1d
 +		writer.EndObject();
 +	}
 +
++	// HelpComponent's icons (ICON_PATH_MAP there), by prompt name
++	const char* HELP_ICONS[][2] = {
++		{ "up/down", ":/help/dpad_updown.svg" },
++		{ "left/right", ":/help/dpad_leftright.svg" },
++		{ "up/down/left/right", ":/help/dpad_all.svg" },
++		{ "a", ":/help/button_a.svg" },
++		{ "b", ":/help/button_b.svg" },
++		{ "x", ":/help/button_x.svg" },
++		{ "y", ":/help/button_y.svg" },
++		{ "l", ":/help/button_l.svg" },
++		{ "r", ":/help/button_r.svg" },
++		{ "lr", ":/help/button_lr.svg" },
++		{ "start", ":/help/button_start.svg" },
++		{ "select", ":/help/button_select.svg" },
++		{ "F1", ":/help/F1.svg" },
++	};
++
++	// The help prompts as menus draw them (GuiComponent::getHelpStyle: the
++	// theme's "system" view), with each icon resolved to a file.
++	void writeHelp(Writer& writer)
++	{
++		HelpStyle style;
++		if (ThemeData::getDefaultTheme() != nullptr)
++		{
++			std::shared_ptr<ThemeData> theme(ThemeData::getDefaultTheme(), [](ThemeData*) {});
++			style.applyTheme(theme, "system");
++		}
++
++		writer.Key("help");
++		writer.StartObject();
++		writer.Key("visible");
++		writer.Bool(Settings::getInstance()->getBool("ShowHelpPrompts"));
++		writePair(writer, "position", style.position);
++		writePair(writer, "origin", style.origin);
++		writeColor(writer, "iconColor", style.iconColor);
++		writeColor(writer, "textColor", style.textColor);
++		writeColor(writer, "glowColor", style.glowColor);
++		writer.Key("glowSize");
++		writer.Int(style.glowSize);
++		writePair(writer, "glowOffset", style.glowOffset);
++		writeFont(writer, style.font);
++
++		writer.Key("icons");
++		writer.StartObject();
++		for (const auto& icon : HELP_ICONS)
++		{
++			auto custom = style.iconMap.find(icon[0]);
++			bool themed = custom != style.iconMap.end() && ResourceManager::getInstance()->fileExists(custom->second);
++			writePath(writer, icon[0], themed ? custom->second : std::string(icon[1]));
++		}
++		writer.EndObject();
++
++		// the icons of confirm and back, after "Switch confirm & cancel"
++		writeString(writer, "ok", InputConfig::buttonLabel(BUTTON_OK));
++		writeString(writer, "back", InputConfig::buttonLabel(BUTTON_BACK));
++		writer.EndObject();
++	}
++
 +	void writeSettings(Writer& writer)
 +	{
 +		writer.Key("screen");
@@ -257,6 +317,7 @@ index 0000000..ff8ce1d
 +	writeElement(writer, "footer", menu->Footer);
 +	writeGroup(writer, menu->Group);
 +	writeIcons(writer, *menu);
++	writeHelp(writer);
 +	writer.EndObject();
 +
 +	const std::string path(target);
