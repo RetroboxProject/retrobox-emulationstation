@@ -39,10 +39,10 @@ index a660db3..129e505 100644
  
 diff --git a/es-app/src/RetroboxMenuTheme.cpp b/es-app/src/RetroboxMenuTheme.cpp
 new file mode 100644
-index 0000000..45b278a
+index 0000000..79d8854
 --- /dev/null
 +++ b/es-app/src/RetroboxMenuTheme.cpp
-@@ -0,0 +1,284 @@
+@@ -0,0 +1,289 @@
 +#include "RetroboxMenuTheme.h"
 +
 +#include "HelpStyle.h"
@@ -266,7 +266,12 @@ index 0000000..45b278a
 +		writer.EndObject();
 +
 +		writeString(writer, "themeSet", Settings::getInstance()->getString("ThemeSet"));
-+		writeString(writer, "language", SystemConf::getInstance()->get("system.language"));
++		// The built-in default ("en_US") is not a choice: leave it empty so the
++		// overlay follows the system locale instead.
++		std::string language = SystemConf::getInstance()->get("system.language");
++		if (language == Settings::getInstance()->getDefaultString("Language"))
++			language.clear();
++		writeString(writer, "language", language);
 +		writer.Key("fullScreenMenus");
 +		writer.Bool(Renderer::ScreenSettings::fullScreenMenus());
 +		writer.Key("menuFontScale");
@@ -350,3 +355,32 @@ index 0000000..944b1e3
 +}
 +
 +#endif // ES_APP_RETROBOX_MENU_THEME_H
+diff --git a/es-core/src/Settings.cpp b/es-core/src/Settings.cpp
+index 2be5f4e..8055c98 100644
+--- a/es-core/src/Settings.cpp
++++ b/es-core/src/Settings.cpp
+@@ -560,6 +560,12 @@ SETTINGS_GETSET(bool, mBoolMap, getBool, setBool, false);
+ SETTINGS_GETSET(int, mIntMap, getInt, setInt, 0);
+ SETTINGS_GETSET(float, mFloatMap, getFloat, setFloat, 0.0f);
+ 
++std::string Settings::getDefaultString(const std::string& name)
++{
++	auto it = mDefaultStringMap.find(name);
++	return it == mDefaultStringMap.cend() ? "" : it->second;
++}
++
+ std::string Settings::getString(const std::string& name)
+ {
+ 	auto it = mStringMap.find(name);
+diff --git a/es-core/src/Settings.h b/es-core/src/Settings.h
+index 963024d..602a618 100644
+--- a/es-core/src/Settings.h
++++ b/es-core/src/Settings.h
+@@ -69,6 +69,7 @@ public:
+ 	int getInt(const std::string& name);
+ 	float getFloat(const std::string& name);
+ 	std::string getString(const std::string& name);
++	std::string getDefaultString(const std::string& name);
+ 
+ 	bool setBool(const std::string& name, bool value);
+ 	bool setInt(const std::string& name, int value);
