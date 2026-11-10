@@ -1,0 +1,152 @@
+diff --git a/es-app/src/FileData.cpp b/es-app/src/FileData.cpp
+index 129e505..a0a6324 100644
+--- a/es-app/src/FileData.cpp
++++ b/es-app/src/FileData.cpp
+@@ -716,7 +716,7 @@ bool FileData::launchGame(Window* window, LaunchGameOptions options)
+ 		return false;
+ 
+ 	// Retrobox: the in-game overlay draws its menu like ours
+-	RetroboxMenuTheme::exportForLaunch();
++	RetroboxMenuTheme::exportMenuTheme();
+ 
+ 	AudioManager::getInstance()->deinit();
+ 	VolumeControl::getInstance()->deinit();
+diff --git a/es-app/src/RetroboxMenuTheme.cpp b/es-app/src/RetroboxMenuTheme.cpp
+index 79d8854..5359b74 100644
+--- a/es-app/src/RetroboxMenuTheme.cpp
++++ b/es-app/src/RetroboxMenuTheme.cpp
+@@ -253,7 +253,7 @@ namespace
+ 	}
+ }
+ 
+-void RetroboxMenuTheme::exportForLaunch()
++void RetroboxMenuTheme::exportMenuTheme()
+ {
+ 	const char* target = std::getenv(ENV_VARIABLE);
+ 	if (target == nullptr || target[0] == '\0')
+diff --git a/es-app/src/RetroboxMenuTheme.h b/es-app/src/RetroboxMenuTheme.h
+index 944b1e3..6a44fc8 100644
+--- a/es-app/src/RetroboxMenuTheme.h
++++ b/es-app/src/RetroboxMenuTheme.h
+@@ -4,14 +4,16 @@
+ 
+ // Retrobox: export of the resolved menu theme for the in-game overlay.
+ //
+-// When the RETROBOX_ES_MENU_THEME environment variable names a file, every
+-// game launch writes there, as JSON, the menu style EmulationStation is
+-// drawing with: the active theme's menu elements once includes, variables,
+-// subsets and the user's theme choices are applied, with absolute paths and
+-// font sizes in pixels. Without the variable nothing is written.
++// When the RETROBOX_ES_MENU_THEME environment variable names a file,
++// EmulationStation writes there, as JSON, the menu style it is drawing with:
++// the active theme's menu elements once includes, variables, subsets and the
++// user's theme choices are applied, with absolute paths and font sizes in
++// pixels. It does so once started, whenever the themes are reloaded or the
++// settings saved, and before each game launch, so the overlay looks like the
++// menus outside games too. Without the variable nothing is written.
+ namespace RetroboxMenuTheme
+ {
+-	void exportForLaunch();
++	void exportMenuTheme();
+ }
+ 
+ #endif // ES_APP_RETROBOX_MENU_THEME_H
+diff --git a/es-app/src/main.cpp b/es-app/src/main.cpp
+index af0e7b2..26900ea 100644
+--- a/es-app/src/main.cpp
++++ b/es-app/src/main.cpp
+@@ -18,6 +18,7 @@
+ #include "utils/Platform.h"
+ #include "PowerSaver.h"
+ #include "Settings.h"
++#include "RetroboxMenuTheme.h"
+ #include "SystemData.h"
+ #include "SystemScreenSaver.h"
+ #include <SDL_events.h>
+@@ -668,6 +669,11 @@ int main(int argc, char* argv[])
+ 		ViewController::get()->goToStart(true);
+ 	}
+ 
++	// Retrobox: the overlay draws its menu like ours from the start, and
++	// follows the settings (confirm button, 12-hour clock, help) as they are saved
++	RetroboxMenuTheme::exportMenuTheme();
++	Settings::getInstance()->setSavedCallback(RetroboxMenuTheme::exportMenuTheme);
++
+ 	threadPool->wait();
+ 	delete threadPool;
+ 
+@@ -864,6 +870,9 @@ int main(int argc, char* argv[])
+ 		Renderer::swapBuffers();		
+ 	}
+ 
++	// Retrobox: the themes go away from here on
++	Settings::getInstance()->setSavedCallback(nullptr);
++
+ 	if (Utils::Platform::isFastShutdown())
+ 		Settings::getInstance()->setBool("IgnoreGamelist", true);
+ 
+diff --git a/es-app/src/views/ViewController.cpp b/es-app/src/views/ViewController.cpp
+index 549d638..4e92d18 100644
+--- a/es-app/src/views/ViewController.cpp
++++ b/es-app/src/views/ViewController.cpp
+@@ -32,6 +32,7 @@
+ #include "VolumeControl.h"
+ #include "guis/GuiNetPlay.h"
+ #include "Gamelist.h"
++#include "RetroboxMenuTheme.h"
+ 
+ ViewController* ViewController::sInstance = nullptr;
+ 
+@@ -1333,6 +1334,9 @@ void ViewController::reloadAll(Window* window, bool reloadTheme)
+ 		mCurrentView->onShow();
+ 
+ 	updateHelpPrompts();
++
++	// Retrobox: the overlay follows the theme just loaded
++	RetroboxMenuTheme::exportMenuTheme();
+ }
+ 
+ std::vector<HelpPrompt> ViewController::getHelpPrompts()
+diff --git a/es-core/src/Settings.cpp b/es-core/src/Settings.cpp
+index 8055c98..12c7cc6 100644
+--- a/es-core/src/Settings.cpp
++++ b/es-core/src/Settings.cpp
+@@ -490,6 +490,9 @@ bool Settings::saveFile()
+ 	Scripting::fireEvent("config-changed");
+ 	Scripting::fireEvent("settings-changed");
+ 
++	if (mSavedCallback)
++		mSavedCallback();
++
+ 	return true;
+ }
+ 
+diff --git a/es-core/src/Settings.h b/es-core/src/Settings.h
+index 602a618..61e4da8 100644
+--- a/es-core/src/Settings.h
++++ b/es-core/src/Settings.h
+@@ -7,6 +7,7 @@
+ #include <vector>
+ #include <set>
+ #include "utils/Delegate.h"
++#include <functional>
+ 
+ // Non-cached settings macros
+ #define DEFINE_BOOL_SETTING(XX) static bool XX() { return Settings::getInstance()->getBool(#XX); }; static bool set##XX(bool val) { return Settings::getInstance()->setBool(#XX, val); };
+@@ -60,6 +61,8 @@ public:
+ 
+ 	void loadFile();
+ 	bool saveFile();
++	// called after each save (Retrobox: the overlay's menu theme)
++	void setSavedCallback(std::function<void()> callback) { mSavedCallback = callback; }
+ 
+ 	SettingType getSettingType(const std::string& name);
+ 	std::vector<std::string> getSettingsNames();
+@@ -133,6 +136,7 @@ public:
+ 
+ private:
+ 	static Settings* sInstance;
++	std::function<void()> mSavedCallback;
+ 
+ 	Settings();
+ 
