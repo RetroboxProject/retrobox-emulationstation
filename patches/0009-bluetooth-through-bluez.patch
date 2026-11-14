@@ -1,0 +1,1298 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e509df9..8e56275 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -234,6 +234,18 @@ if(NOT WIN32)
+ 	else()
+ 	  MESSAGE("udev not found. guns will be disabled")
+ 	endif()
++
++	# Bluetooth goes through BlueZ over D-Bus, using sd-bus (libsystemd). Optional: without
++	# it the Bluetooth entries keep calling the batocera-bluetooth script.
++	if(PKG_CONFIG_FOUND)
++	  pkg_check_modules(SDBUS QUIET libsystemd)
++	endif()
++	if(SDBUS_FOUND)
++	  MESSAGE("sd-bus found. Bluetooth through BlueZ enabled")
++	  add_definitions(-DHAVE_BLUEZ)
++	else()
++	  MESSAGE("sd-bus not found. Bluetooth will use the batocera-bluetooth script")
++	endif()
+ 	
+ 	if(ENABLE_TTS)
+ 	  MESSAGE("tts enabled")
+@@ -339,6 +351,7 @@ set(COMMON_INCLUDE_DIRS
+     ${FREETYPE_INCLUDE_DIRS}
+     ${FreeImage_INCLUDE_DIRS}
+     ${FRIBIDI_INCLUDE_DIRS}
++    ${SDBUS_INCLUDE_DIRS}
+     # batocera / background musics
+     ${SDLMIXER_INCLUDE_DIR}
+     # batocera / customisations    
+@@ -444,6 +457,12 @@ if(UDEV_FOUND)
+       )
+ endif()
+ 
++if(SDBUS_FOUND)
++ LIST(APPEND COMMON_LIBRARIES
++    ${SDBUS_LIBRARIES}
++      )
++endif()
++
+ if(ENABLE_PULSE)
+  LIST(APPEND COMMON_LIBRARIES
+     ${PULSEAUDIO_LIBRARY}
+diff --git a/es-app/CMakeLists.txt b/es-app/CMakeLists.txt
+index 0499263..c3e75d7 100644
+--- a/es-app/CMakeLists.txt
++++ b/es-app/CMakeLists.txt
+@@ -136,6 +136,8 @@ set(ES_HEADERS
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/ZaparooSupport.h
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/LibretroRatio.h # batocera
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/Win32ApiSystem.h # batocera
++    ${CMAKE_CURRENT_SOURCE_DIR}/src/BluezApiSystem.h
++    ${CMAKE_CURRENT_SOURCE_DIR}/src/BluezBluetooth.h
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/RetroboxMenuTheme.h # retrobox
+ )
+ 
+@@ -239,6 +241,8 @@ set(ES_SOURCES
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/ZaparooSupport.cpp
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/LibretroRatio.cpp # batocera
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/Win32ApiSystem.cpp # batocera
++	${CMAKE_CURRENT_SOURCE_DIR}/src/BluezApiSystem.cpp
++	${CMAKE_CURRENT_SOURCE_DIR}/src/BluezBluetooth.cpp
+ )
+ 
+ #-------------------------------------------------------------------------------
+diff --git a/es-app/src/ApiSystem.cpp b/es-app/src/ApiSystem.cpp
+index 614c05a..200515c 100644
+--- a/es-app/src/ApiSystem.cpp
++++ b/es-app/src/ApiSystem.cpp
+@@ -42,6 +42,7 @@
+ #define WEXITSTATUS(x) x
+ #include "Win32ApiSystem.h"
+ #else
++#include "BluezApiSystem.h"
+ #include <sys/statvfs.h>
+ #include <ifaddrs.h>
+ #include <netinet/in.h>
+@@ -106,6 +107,8 @@ ApiSystem *ApiSystem::getInstance()
+ 	{
+ #if WIN32
+ 		ApiSystem::instance = new Win32ApiSystem();
++#elif defined(HAVE_BLUEZ)
++		ApiSystem::instance = new BluezApiSystem();
+ #else
+ 		ApiSystem::instance = new ApiSystem();
+ #endif
+diff --git a/es-app/src/BluezApiSystem.cpp b/es-app/src/BluezApiSystem.cpp
+new file mode 100644
+index 0000000..53ffca0
+--- /dev/null
++++ b/es-app/src/BluezApiSystem.cpp
+@@ -0,0 +1,198 @@
++#if defined(HAVE_BLUEZ)
++
++#include "BluezApiSystem.h"
++#include "BluezBluetooth.h"
++#include "Log.h"
++#include "LocaleES.h"
++#include "utils/StringUtil.h"
++
++#include <chrono>
++#include <map>
++#include <set>
++
++namespace
++{
++	// The menus read these lines with Utils::String::extractString between double
++	// quotes, so a quote or a line break inside a name would cut or split the entry.
++	std::string clean(const std::string& text)
++	{
++		std::string result = text;
++		for (auto& c : result)
++			if (c == '"')
++				c = '\'';
++			else if (c == '\n' || c == '\r' || c == '\t')
++				c = ' ';
++
++		return result;
++	}
++
++	std::string deviceLine(const Bluez::Device& device, const std::string& extra)
++	{
++		return "<device id=\"" + device.address + "\" name=\"" + clean(device.displayName()) + "\" type=\"" + device.guiType() + "\" " + extra + "/>";
++	}
++
++	bool report(const char* action, bool ok, const std::string& error)
++	{
++		if (!ok)
++			LOG(LogError) << "Bluetooth: " << action << " failed: " << error;
++
++		return ok;
++	}
++}
++
++bool BluezApiSystem::isScriptingSupported(ScriptId script)
++{
++	if (script == ApiSystem::BLUETOOTH)
++		return Bluez::isAvailable();
++
++	return ApiSystem::isScriptingSupported(script);
++}
++
++bool BluezApiSystem::enableBluetooth()
++{
++	std::string error;
++	return report("power on", Bluez::setPowered(true, &error), error);
++}
++
++bool BluezApiSystem::disableBluetooth()
++{
++	std::string error;
++	return report("power off", Bluez::setPowered(false, &error), error);
++}
++
++// Announces the devices in range that are not paired yet, as <device ... status="added|removed"/>
++// lines, until stopBluetoothLiveDevices() is called (or five minutes pass).
++void BluezApiSystem::startBluetoothLiveDevices(const std::function<void(const std::string)>& func)
++{
++	mStopLiveDevices = false;
++
++	std::map<std::string, Bluez::Device> announced;
++
++	std::string error;
++	bool ok = Bluez::discover(std::chrono::minutes(5), mStopLiveDevices, [&](const std::vector<Bluez::Device>& devices)
++	{
++		std::set<std::string> visible;
++
++		for (const auto& device : devices)
++		{
++			// Without a name it is a beacon or a phone passing by; without RSSI it is only cached.
++			if (device.paired || !device.hasRssi || device.name.empty())
++				continue;
++
++			visible.insert(device.address);
++
++			if (announced.find(device.address) == announced.end())
++			{
++				announced[device.address] = device;
++				func(deviceLine(device, "status=\"added\""));
++			}
++		}
++
++		for (auto it = announced.begin(); it != announced.end(); )
++		{
++			if (visible.find(it->first) == visible.end())
++			{
++				func(deviceLine(it->second, "status=\"removed\""));
++				it = announced.erase(it);
++			}
++			else
++				++it;
++		}
++	}, &error);
++
++	report("scan", ok, error);
++}
++
++void BluezApiSystem::stopBluetoothLiveDevices()
++{
++	mStopLiveDevices = true;
++}
++
++bool BluezApiSystem::pairBluetoothDevice(const std::string& deviceName)
++{
++	std::string error;
++	return report("pair", Bluez::pair(deviceName, &error), error);
++}
++
++bool BluezApiSystem::connectBluetoothDevice(const std::string& deviceName)
++{
++	std::string error;
++	return report("connect", Bluez::connect(deviceName, &error), error);
++}
++
++bool BluezApiSystem::disconnectBluetoothDevice(const std::string& deviceName)
++{
++	std::string error;
++	return report("disconnect", Bluez::disconnect(deviceName, &error), error);
++}
++
++bool BluezApiSystem::removeBluetoothDevice(const std::string& deviceName)
++{
++	std::string error;
++	return report("remove", Bluez::remove(deviceName, &error), error);
++}
++
++bool BluezApiSystem::forgetBluetoothControllers()
++{
++	std::string error;
++	return report("remove all", Bluez::removeAllPaired(&error), error);
++}
++
++std::vector<std::string> BluezApiSystem::getPairedBluetoothDeviceList()
++{
++	std::vector<std::string> lines;
++
++	for (const auto& device : Bluez::listDevices())
++		if (device.paired)
++			lines.push_back(deviceLine(device, std::string("connected=\"") + (device.connected ? "yes" : "no") + "\""));
++
++	return lines;
++}
++
++// "Pair Bluetooth pads automatically": scans for input devices (pads, keyboards, mice) and
++// pairs each one as it shows up. It stops after 30 seconds, or 5 seconds after the last
++// successful pairing, so a second pad can still be picked up.
++bool BluezApiSystem::scanNewBluetooth(const std::function<void(const std::string)>& func)
++{
++	auto notify = [&func](const std::string& text) { if (func != nullptr) func(text); };
++
++	std::set<std::string> tried;
++	std::atomic<bool> stop{ false };
++	int paired = 0;
++	auto lastPaired = std::chrono::steady_clock::now();
++
++	notify(_("Searching for controllers..."));
++
++	std::string error;
++	bool ok = Bluez::discover(std::chrono::seconds(30), stop, [&](const std::vector<Bluez::Device>& devices)
++	{
++		for (const auto& device : devices)
++		{
++			if (device.paired || !device.hasRssi || !device.isInput() || tried.count(device.address) != 0)
++				continue;
++
++			tried.insert(device.address);
++			const std::string name = device.displayName();
++
++			notify(Utils::String::format(_("Pairing %s...").c_str(), name.c_str()));
++
++			std::string pairError;
++			if (report("pair", Bluez::pair(device.address, &pairError), pairError))
++			{
++				paired++;
++				lastPaired = std::chrono::steady_clock::now();
++				notify(Utils::String::format(_("%s paired").c_str(), name.c_str()));
++			}
++			else
++				notify(Utils::String::format(_("Could not pair %s").c_str(), name.c_str()));
++		}
++
++		if (paired > 0 && std::chrono::steady_clock::now() - lastPaired > std::chrono::seconds(5))
++			stop = true;
++	}, &error);
++
++	report("scan", ok, error);
++	return ok && paired > 0;
++}
++
++#endif
+diff --git a/es-app/src/BluezApiSystem.h b/es-app/src/BluezApiSystem.h
+new file mode 100644
+index 0000000..6208106
+--- /dev/null
++++ b/es-app/src/BluezApiSystem.h
+@@ -0,0 +1,34 @@
++#pragma once
++
++#if defined(HAVE_BLUEZ)
++
++#include "ApiSystem.h"
++
++#include <atomic>
++
++// ApiSystem for a regular Linux desktop: the Bluetooth entries talk to BlueZ through
++// D-Bus instead of the batocera-bluetooth script, which does not exist there.
++class BluezApiSystem : public ApiSystem
++{
++public:
++	BluezApiSystem() { }
++
++	bool isScriptingSupported(ScriptId script) override;
++
++	bool enableBluetooth() override;
++	bool disableBluetooth() override;
++	void startBluetoothLiveDevices(const std::function<void(const std::string)>& func) override;
++	void stopBluetoothLiveDevices() override;
++	bool pairBluetoothDevice(const std::string& deviceName) override;
++	bool connectBluetoothDevice(const std::string& deviceName) override;
++	bool disconnectBluetoothDevice(const std::string& deviceName) override;
++	bool removeBluetoothDevice(const std::string& deviceName) override;
++	bool forgetBluetoothControllers() override;
++	std::vector<std::string> getPairedBluetoothDeviceList() override;
++	bool scanNewBluetooth(const std::function<void(const std::string)>& func = nullptr) override;
++
++private:
++	std::atomic<bool> mStopLiveDevices{ false };
++};
++
++#endif
+diff --git a/es-app/src/BluezBluetooth.cpp b/es-app/src/BluezBluetooth.cpp
+new file mode 100644
+index 0000000..1d1b9e5
+--- /dev/null
++++ b/es-app/src/BluezBluetooth.cpp
+@@ -0,0 +1,837 @@
++#if defined(HAVE_BLUEZ)
++
++#include "BluezBluetooth.h"
++
++#include <systemd/sd-bus.h>
++
++#include <algorithm>
++#include <cctype>
++#include <cstdint>
++#include <cstdlib>
++#include <thread>
++
++namespace Bluez
++{
++	namespace
++	{
++		const char* const BLUEZ_SERVICE = "org.bluez";
++		const char* const ADAPTER_IFACE = "org.bluez.Adapter1";
++		const char* const DEVICE_IFACE = "org.bluez.Device1";
++		const char* const AGENT_MANAGER_IFACE = "org.bluez.AgentManager1";
++		const char* const AGENT_PATH = "/org/retrobox/bluez/agent";
++
++		const char* const HID_UUID = "00001124-0000-1000-8000-00805f9b34fb";
++		const char* const HOG_UUID = "00001812-0000-1000-8000-00805f9b34fb";
++
++		constexpr uint64_t USEC = 1000000ULL;
++		constexpr uint64_t PROBE_TIMEOUT = 5 * USEC;      // is bluetoothd there?
++		constexpr uint64_t CALL_TIMEOUT = 30 * USEC;      // Connect, Disconnect...
++		constexpr uint64_t PAIR_TIMEOUT = 60 * USEC;
++
++		// ---------------------------------------------------------------- helpers
++
++		class Bus
++		{
++		public:
++			Bus() { if (sd_bus_open_system(&mBus) < 0) mBus = nullptr; }
++			~Bus() { if (mBus != nullptr) sd_bus_flush_close_unref(mBus); }
++			Bus(const Bus&) = delete;
++			Bus& operator=(const Bus&) = delete;
++
++			sd_bus* get() const { return mBus; }
++			explicit operator bool() const { return mBus != nullptr; }
++
++		private:
++			sd_bus* mBus = nullptr;
++		};
++
++		class Error
++		{
++		public:
++			Error() = default;
++			~Error() { sd_bus_error_free(&mError); }
++			Error(const Error&) = delete;
++			Error& operator=(const Error&) = delete;
++
++			sd_bus_error* get() { return &mError; }
++			bool is(const char* name) const { return sd_bus_error_has_name(&mError, name) != 0; }
++			std::string text(int code) const
++			{
++				if (sd_bus_error_is_set(&mError))
++					return std::string(mError.name != nullptr ? mError.name : "error") + ": " + (mError.message != nullptr ? mError.message : "");
++
++				return std::string("error ") + std::to_string(code);
++			}
++
++		private:
++			sd_bus_error mError = SD_BUS_ERROR_NULL;
++		};
++
++		class Message
++		{
++		public:
++			Message() = default;
++			~Message() { sd_bus_message_unref(mMessage); }
++			Message(const Message&) = delete;
++			Message& operator=(const Message&) = delete;
++
++			sd_bus_message** out() { return &mMessage; }
++			sd_bus_message* get() const { return mMessage; }
++
++		private:
++			sd_bus_message* mMessage = nullptr;
++		};
++
++		void setError(std::string* target, const std::string& text)
++		{
++			if (target != nullptr)
++				*target = text;
++		}
++
++		std::string upper(std::string text)
++		{
++			std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return (char)std::toupper(c); });
++			return text;
++		}
++
++		// Plain method call without arguments, with an explicit timeout.
++		int callNoArgs(sd_bus* bus, const char* path, const char* iface, const char* member, uint64_t timeout, Message* reply, Error& error)
++		{
++			Message call;
++			int r = sd_bus_message_new_method_call(bus, call.out(), BLUEZ_SERVICE, path, iface, member);
++			if (r < 0)
++				return r;
++
++			return sd_bus_call(bus, call.get(), timeout, error.get(), reply != nullptr ? reply->out() : nullptr);
++		}
++
++		// Method call taking one object path.
++		int callWithPath(sd_bus* bus, const char* path, const char* iface, const char* member, const std::string& arg, uint64_t timeout, Error& error)
++		{
++			Message call;
++			int r = sd_bus_message_new_method_call(bus, call.out(), BLUEZ_SERVICE, path, iface, member);
++			if (r < 0)
++				return r;
++
++			r = sd_bus_message_append(call.get(), "o", arg.c_str());
++			if (r < 0)
++				return r;
++
++			return sd_bus_call(bus, call.get(), timeout, error.get(), nullptr);
++		}
++
++		// ------------------------------------------------------- object model
++
++		struct Adapter
++		{
++			std::string path;
++			bool powered = false;
++		};
++
++		struct State
++		{
++			std::vector<Adapter> adapters;
++			std::vector<Device> devices;
++		};
++
++		// Reads the value of a property variant that was just entered. `contents` is its signature.
++		int readDeviceProperty(sd_bus_message* m, Device& device, const std::string& key, const char* contents)
++		{
++			const std::string type = contents;
++			const char* text = nullptr;
++			int flag = 0;
++			int r = 0;
++
++			if (type == "s" && (key == "Address" || key == "Name" || key == "Alias" || key == "Icon"))
++			{
++				r = sd_bus_message_read(m, "s", &text);
++				if (r < 0)
++					return r;
++
++				std::string value = text != nullptr ? text : "";
++				if (key == "Address") device.address = value;
++				else if (key == "Name") device.name = value;
++				else if (key == "Alias") device.alias = value;
++				else device.icon = value;
++			}
++			else if (type == "b" && (key == "Paired" || key == "Trusted" || key == "Connected"))
++			{
++				r = sd_bus_message_read(m, "b", &flag);
++				if (r < 0)
++					return r;
++
++				if (key == "Paired") device.paired = flag != 0;
++				else if (key == "Trusted") device.trusted = flag != 0;
++				else device.connected = flag != 0;
++			}
++			else if (type == "n" && key == "RSSI")
++			{
++				int16_t rssi = 0;
++				r = sd_bus_message_read(m, "n", &rssi);
++				if (r < 0)
++					return r;
++
++				device.hasRssi = true;
++			}
++			else if (type == "as" && key == "UUIDs")
++			{
++				r = sd_bus_message_enter_container(m, 'a', "s");
++				if (r < 0)
++					return r;
++
++				while ((r = sd_bus_message_read(m, "s", &text)) > 0)
++					device.uuids.push_back(text != nullptr ? text : "");
++
++				if (r < 0)
++					return r;
++
++				r = sd_bus_message_exit_container(m);
++				if (r < 0)
++					return r;
++			}
++			else
++			{
++				r = sd_bus_message_skip(m, contents);
++				if (r < 0)
++					return r;
++			}
++
++			return 0;
++		}
++
++		int readAdapterProperty(sd_bus_message* m, Adapter& adapter, const std::string& key, const char* contents)
++		{
++			if (key == "Powered" && std::string(contents) == "b")
++			{
++				int flag = 0;
++				int r = sd_bus_message_read(m, "b", &flag);
++				if (r < 0)
++					return r;
++
++				adapter.powered = flag != 0;
++				return 0;
++			}
++
++			return sd_bus_message_skip(m, contents);
++		}
++
++		// Reads the dictionary of properties of one interface: a{sv}
++		int readProperties(sd_bus_message* m, const std::string& iface, Device& device, Adapter& adapter)
++		{
++			int r = sd_bus_message_enter_container(m, 'a', "{sv}");
++			if (r < 0)
++				return r;
++
++			while ((r = sd_bus_message_enter_container(m, 'e', "sv")) > 0)
++			{
++				const char* key = nullptr;
++				r = sd_bus_message_read(m, "s", &key);
++				if (r < 0)
++					return r;
++
++				char type = 0;
++				const char* contents = nullptr;
++				r = sd_bus_message_peek_type(m, &type, &contents);
++				if (r < 0)
++					return r;
++
++				// sd-bus reuses the buffer behind `contents` as soon as the variant is entered.
++				const std::string signature = contents != nullptr ? contents : "";
++				const std::string name = key != nullptr ? key : "";
++
++				r = sd_bus_message_enter_container(m, 'v', signature.c_str());
++				if (r < 0)
++					return r;
++
++				if (iface == DEVICE_IFACE)
++					r = readDeviceProperty(m, device, name, signature.c_str());
++				else if (iface == ADAPTER_IFACE)
++					r = readAdapterProperty(m, adapter, name, signature.c_str());
++				else
++					r = sd_bus_message_skip(m, signature.c_str());
++
++				if (r < 0)
++					return r;
++
++				r = sd_bus_message_exit_container(m); // v
++				if (r < 0)
++					return r;
++
++				r = sd_bus_message_exit_container(m); // e
++				if (r < 0)
++					return r;
++			}
++
++			if (r < 0)
++				return r;
++
++			return sd_bus_message_exit_container(m);
++		}
++
++		// GetManagedObjects() of the BlueZ root: a{oa{sa{sv}}}
++		int readState(sd_bus* bus, State& state, uint64_t timeout, std::string* errorText)
++		{
++			Error error;
++			Message reply;
++
++			int r = callNoArgs(bus, "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects", timeout, &reply, error);
++			if (r < 0)
++			{
++				setError(errorText, error.text(r));
++				return r;
++			}
++
++			sd_bus_message* m = reply.get();
++
++			r = sd_bus_message_enter_container(m, 'a', "{oa{sa{sv}}}");
++			if (r < 0)
++				return r;
++
++			while ((r = sd_bus_message_enter_container(m, 'e', "oa{sa{sv}}")) > 0)
++			{
++				const char* path = nullptr;
++				r = sd_bus_message_read(m, "o", &path);
++				if (r < 0)
++					return r;
++
++				Device device;
++				Adapter adapter;
++				bool isDevice = false;
++				bool isAdapter = false;
++
++				r = sd_bus_message_enter_container(m, 'a', "{sa{sv}}");
++				if (r < 0)
++					return r;
++
++				while ((r = sd_bus_message_enter_container(m, 'e', "sa{sv}")) > 0)
++				{
++					const char* iface = nullptr;
++					r = sd_bus_message_read(m, "s", &iface);
++					if (r < 0)
++						return r;
++
++					std::string ifaceName = iface != nullptr ? iface : "";
++					isDevice |= ifaceName == DEVICE_IFACE;
++					isAdapter |= ifaceName == ADAPTER_IFACE;
++
++					r = readProperties(m, ifaceName, device, adapter);
++					if (r < 0)
++						return r;
++
++					r = sd_bus_message_exit_container(m); // e
++					if (r < 0)
++						return r;
++				}
++
++				if (r < 0)
++					return r;
++
++				r = sd_bus_message_exit_container(m); // a{sa{sv}}
++				if (r < 0)
++					return r;
++
++				r = sd_bus_message_exit_container(m); // e
++				if (r < 0)
++					return r;
++
++				if (isAdapter)
++				{
++					adapter.path = path != nullptr ? path : "";
++					state.adapters.push_back(adapter);
++				}
++
++				if (isDevice)
++				{
++					device.path = path != nullptr ? path : "";
++					state.devices.push_back(device);
++				}
++			}
++
++			if (r < 0)
++				return r;
++
++			return sd_bus_message_exit_container(m);
++		}
++
++		const Device* findDevice(const State& state, const std::string& address)
++		{
++			const std::string wanted = upper(address);
++			for (const auto& device : state.devices)
++				if (upper(device.address) == wanted)
++					return &device;
++
++			return nullptr;
++		}
++
++		// "/org/bluez/hci0/dev_XX..." -> "/org/bluez/hci0"
++		std::string adapterOf(const Device& device)
++		{
++			const auto slash = device.path.rfind('/');
++			return slash == std::string::npos || slash == 0 ? std::string() : device.path.substr(0, slash);
++		}
++
++		// Opens the bus and finds `address`.
++		bool openAndFind(const std::string& address, Bus& bus, State& state, Device& device, std::string* errorText)
++		{
++			if (!bus)
++			{
++				setError(errorText, "cannot connect to the system bus");
++				return false;
++			}
++
++			if (readState(bus.get(), state, CALL_TIMEOUT, errorText) < 0)
++			{
++				if (errorText != nullptr && errorText->empty())
++					*errorText = "cannot read the BlueZ objects";
++				return false;
++			}
++
++			const Device* found = findDevice(state, address);
++			if (found == nullptr)
++			{
++				setError(errorText, "device " + address + " is not known to BlueZ");
++				return false;
++			}
++
++			device = *found;
++			return true;
++		}
++
++		bool powerAdapter(sd_bus* bus, const std::string& adapterPath, bool powered, std::string* errorText)
++		{
++			Error error;
++			int r = sd_bus_set_property(bus, BLUEZ_SERVICE, adapterPath.c_str(), ADAPTER_IFACE, "Powered", error.get(), "b", powered ? 1 : 0);
++
++			if (r < 0 && powered)
++			{
++				// A soft-blocked radio refuses to power on: unblock it and try once more.
++				if (system("rfkill unblock bluetooth >/dev/null 2>&1") == 0)
++				{
++					Error retryError;
++					r = sd_bus_set_property(bus, BLUEZ_SERVICE, adapterPath.c_str(), ADAPTER_IFACE, "Powered", retryError.get(), "b", 1);
++					if (r < 0)
++					{
++						setError(errorText, retryError.text(r));
++						return false;
++					}
++					return true;
++				}
++			}
++
++			if (r < 0)
++			{
++				setError(errorText, error.text(r));
++				return false;
++			}
++
++			return true;
++		}
++
++		// ------------------------------------------------------- pairing agent
++		//
++		// Registered on the very connection that calls Pair(): BlueZ then uses it for that
++		// request and any agent of the desktop session (bluedevil, GNOME) is left alone.
++		// It has no display and no keyboard: it accepts confirmations and answers 0000 to
++		// PIN requests, which is what gamepads and headsets need.
++
++		int agentOk(sd_bus_message* m, void*, sd_bus_error*)
++		{
++			return sd_bus_reply_method_return(m, nullptr);
++		}
++
++		int agentPinCode(sd_bus_message* m, void*, sd_bus_error*)
++		{
++			return sd_bus_reply_method_return(m, "s", "0000");
++		}
++
++		int agentPasskey(sd_bus_message* m, void*, sd_bus_error*)
++		{
++			return sd_bus_reply_method_return(m, "u", (uint32_t)0);
++		}
++
++		const sd_bus_vtable AGENT_VTABLE[] =
++		{
++			SD_BUS_VTABLE_START(0),
++			SD_BUS_METHOD("Release", "", "", agentOk, 0),
++			SD_BUS_METHOD("RequestPinCode", "o", "s", agentPinCode, 0),
++			SD_BUS_METHOD("DisplayPinCode", "os", "", agentOk, 0),
++			SD_BUS_METHOD("RequestPasskey", "o", "u", agentPasskey, 0),
++			SD_BUS_METHOD("DisplayPasskey", "ouq", "", agentOk, 0),
++			SD_BUS_METHOD("RequestConfirmation", "ou", "", agentOk, 0),
++			SD_BUS_METHOD("RequestAuthorization", "o", "", agentOk, 0),
++			SD_BUS_METHOD("AuthorizeService", "os", "", agentOk, 0),
++			SD_BUS_METHOD("Cancel", "", "", agentOk, 0),
++			SD_BUS_VTABLE_END
++		};
++
++		struct PairResult
++		{
++			bool done = false;
++			bool ok = false;
++			bool alreadyExists = false;
++			std::string error;
++		};
++
++		int onPairReply(sd_bus_message* m, void* userdata, sd_bus_error*)
++		{
++			PairResult* result = static_cast<PairResult*>(userdata);
++			result->done = true;
++
++			if (sd_bus_message_is_method_error(m, nullptr))
++			{
++				const sd_bus_error* error = sd_bus_message_get_error(m);
++				result->ok = false;
++				result->alreadyExists = sd_bus_error_has_name(error, "org.bluez.Error.AlreadyExists") != 0;
++				result->error = std::string(error->name != nullptr ? error->name : "error") + ": " + (error->message != nullptr ? error->message : "");
++			}
++			else
++				result->ok = true;
++
++			return 1;
++		}
++
++		bool runPair(sd_bus* bus, const Device& device, std::string* errorText)
++		{
++			sd_bus_slot* agentSlot = nullptr;
++			bool registered = false;
++
++			int r = sd_bus_add_object_vtable(bus, &agentSlot, AGENT_PATH, "org.bluez.Agent1", AGENT_VTABLE, nullptr);
++			if (r >= 0)
++			{
++				Error error;
++				Message call;
++				r = sd_bus_message_new_method_call(bus, call.out(), BLUEZ_SERVICE, "/org/bluez", AGENT_MANAGER_IFACE, "RegisterAgent");
++				if (r >= 0)
++					r = sd_bus_message_append(call.get(), "os", AGENT_PATH, "NoInputNoOutput");
++				if (r >= 0)
++					r = sd_bus_call(bus, call.get(), CALL_TIMEOUT, error.get(), nullptr);
++
++				registered = r >= 0; // when it fails, BlueZ falls back on the default agent
++			}
++
++			PairResult result;
++			Message pairCall;
++			r = sd_bus_message_new_method_call(bus, pairCall.out(), BLUEZ_SERVICE, device.path.c_str(), DEVICE_IFACE, "Pair");
++			if (r >= 0)
++				r = sd_bus_call_async(bus, nullptr, pairCall.get(), onPairReply, &result, PAIR_TIMEOUT);
++
++			if (r < 0)
++			{
++				setError(errorText, "cannot start the pairing: error " + std::to_string(r));
++				if (registered)
++				{
++					Error error;
++					callWithPath(bus, "/org/bluez", AGENT_MANAGER_IFACE, "UnregisterAgent", AGENT_PATH, CALL_TIMEOUT, error);
++				}
++				sd_bus_slot_unref(agentSlot);
++				return false;
++			}
++
++			// The agent answers from inside sd_bus_process() while Pair() is pending.
++			const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(PAIR_TIMEOUT + 5 * USEC);
++			while (!result.done && std::chrono::steady_clock::now() < deadline)
++			{
++				r = sd_bus_process(bus, nullptr);
++				if (r < 0)
++					break;
++				if (r > 0)
++					continue;
++
++				r = sd_bus_wait(bus, 250000);
++				if (r < 0)
++					break;
++			}
++
++			if (!result.done)
++			{
++				Error error;
++				callNoArgs(bus, device.path.c_str(), DEVICE_IFACE, "CancelPairing", CALL_TIMEOUT, nullptr, error);
++				result.error = "timeout while pairing";
++			}
++
++			if (registered)
++			{
++				Error error;
++				callWithPath(bus, "/org/bluez", AGENT_MANAGER_IFACE, "UnregisterAgent", AGENT_PATH, CALL_TIMEOUT, error);
++			}
++			sd_bus_slot_unref(agentSlot);
++
++			if (!result.ok && !result.alreadyExists)
++			{
++				setError(errorText, result.error);
++				return false;
++			}
++
++			return true;
++		}
++	}
++
++	// ------------------------------------------------------------------- Device
++
++	std::string Device::displayName() const
++	{
++		if (!alias.empty())
++			return alias;
++		if (!name.empty())
++			return name;
++		return address;
++	}
++
++	bool Device::isInput() const
++	{
++		if (icon.compare(0, 6, "input-") == 0)
++			return true;
++
++		for (const auto& uuid : uuids)
++		{
++			std::string lower = uuid;
++			std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return (char)std::tolower(c); });
++			if (lower == HID_UUID || lower == HOG_UUID)
++				return true;
++		}
++
++		return false;
++	}
++
++	std::string Device::guiType() const
++	{
++		if (icon.compare(0, 6, "audio-") == 0)
++			return "audio";
++		if (icon == "input-gaming")
++			return "joystick";
++		if (icon == "input-keyboard")
++			return "keyboard";
++		if (icon == "input-mouse" || icon == "input-tablet")
++			return "mouse";
++
++		return "unknown";
++	}
++
++	// --------------------------------------------------------------- public API
++
++	bool isAvailable()
++	{
++		Bus bus;
++		if (!bus)
++			return false;
++
++		State state;
++		return readState(bus.get(), state, PROBE_TIMEOUT, nullptr) >= 0 && !state.adapters.empty();
++	}
++
++	bool isPowered()
++	{
++		Bus bus;
++		if (!bus)
++			return false;
++
++		State state;
++		if (readState(bus.get(), state, PROBE_TIMEOUT, nullptr) < 0 || state.adapters.empty())
++			return false;
++
++		return state.adapters.front().powered;
++	}
++
++	bool setPowered(bool powered, std::string* error)
++	{
++		Bus bus;
++		if (!bus)
++		{
++			setError(error, "cannot connect to the system bus");
++			return false;
++		}
++
++		State state;
++		if (readState(bus.get(), state, CALL_TIMEOUT, error) < 0)
++			return false;
++
++		if (state.adapters.empty())
++		{
++			setError(error, "no Bluetooth adapter");
++			return false;
++		}
++
++		return powerAdapter(bus.get(), state.adapters.front().path, powered, error);
++	}
++
++	std::vector<Device> listDevices()
++	{
++		Bus bus;
++		State state;
++
++		if (bus && readState(bus.get(), state, CALL_TIMEOUT, nullptr) >= 0)
++			return state.devices;
++
++		return std::vector<Device>();
++	}
++
++	bool discover(std::chrono::seconds timeout, const std::atomic<bool>& stop,
++	              const std::function<void(const std::vector<Device>&)>& onPoll, std::string* error)
++	{
++		Bus bus;
++		if (!bus)
++		{
++			setError(error, "cannot connect to the system bus");
++			return false;
++		}
++
++		State state;
++		if (readState(bus.get(), state, CALL_TIMEOUT, error) < 0)
++			return false;
++
++		if (state.adapters.empty())
++		{
++			setError(error, "no Bluetooth adapter");
++			return false;
++		}
++
++		const Adapter adapter = state.adapters.front();
++		if (!adapter.powered && !powerAdapter(bus.get(), adapter.path, true, error))
++			return false;
++
++		// Discovery belongs to this connection: BlueZ stops it if the connection closes.
++		{
++			Error startError;
++			int r = callNoArgs(bus.get(), adapter.path.c_str(), ADAPTER_IFACE, "StartDiscovery", CALL_TIMEOUT, nullptr, startError);
++			if (r < 0 && !startError.is("org.bluez.Error.InProgress"))
++			{
++				setError(error, startError.text(r));
++				return false;
++			}
++		}
++
++		const auto deadline = std::chrono::steady_clock::now() + timeout;
++		while (!stop.load() && std::chrono::steady_clock::now() < deadline)
++		{
++			State current;
++			if (readState(bus.get(), current, CALL_TIMEOUT, nullptr) >= 0 && onPoll)
++				onPoll(current.devices);
++
++			for (int i = 0; i < 5 && !stop.load(); i++)
++				std::this_thread::sleep_for(std::chrono::milliseconds(100));
++		}
++
++		Error stopError;
++		callNoArgs(bus.get(), adapter.path.c_str(), ADAPTER_IFACE, "StopDiscovery", CALL_TIMEOUT, nullptr, stopError);
++		return true;
++	}
++
++	bool pair(const std::string& address, std::string* error)
++	{
++		Bus bus;
++		State state;
++		Device device;
++		if (!openAndFind(address, bus, state, device, error))
++			return false;
++
++		if (!device.paired && !runPair(bus.get(), device, error))
++			return false;
++
++		{
++			Error trustError;
++			int r = sd_bus_set_property(bus.get(), BLUEZ_SERVICE, device.path.c_str(), DEVICE_IFACE, "Trusted", trustError.get(), "b", 1);
++			if (r < 0)
++			{
++				setError(error, trustError.text(r));
++				return false;
++			}
++		}
++
++		// Best effort: gamepads often connect on their own right after pairing.
++		Error connectError;
++		callNoArgs(bus.get(), device.path.c_str(), DEVICE_IFACE, "Connect", CALL_TIMEOUT, nullptr, connectError);
++		return true;
++	}
++
++	bool connect(const std::string& address, std::string* error)
++	{
++		Bus bus;
++		State state;
++		Device device;
++		if (!openAndFind(address, bus, state, device, error))
++			return false;
++
++		Error callError;
++		int r = callNoArgs(bus.get(), device.path.c_str(), DEVICE_IFACE, "Connect", CALL_TIMEOUT, nullptr, callError);
++		if (r < 0)
++		{
++			setError(error, callError.text(r));
++			return false;
++		}
++
++		return true;
++	}
++
++	bool disconnect(const std::string& address, std::string* error)
++	{
++		Bus bus;
++		State state;
++		Device device;
++		if (!openAndFind(address, bus, state, device, error))
++			return false;
++
++		Error callError;
++		int r = callNoArgs(bus.get(), device.path.c_str(), DEVICE_IFACE, "Disconnect", CALL_TIMEOUT, nullptr, callError);
++		if (r < 0)
++		{
++			setError(error, callError.text(r));
++			return false;
++		}
++
++		return true;
++	}
++
++	static bool removeDevice(sd_bus* bus, const Device& device, std::string* error)
++	{
++		const std::string adapter = adapterOf(device);
++		if (adapter.empty())
++		{
++			setError(error, "bad device path " + device.path);
++			return false;
++		}
++
++		Error callError;
++		int r = callWithPath(bus, adapter.c_str(), ADAPTER_IFACE, "RemoveDevice", device.path, CALL_TIMEOUT, callError);
++		if (r < 0 && !callError.is("org.bluez.Error.DoesNotExist"))
++		{
++			setError(error, callError.text(r));
++			return false;
++		}
++
++		return true;
++	}
++
++	bool remove(const std::string& address, std::string* error)
++	{
++		Bus bus;
++		State state;
++		Device device;
++		if (!openAndFind(address, bus, state, device, error))
++			return false;
++
++		return removeDevice(bus.get(), device, error);
++	}
++
++	bool removeAllPaired(std::string* error)
++	{
++		Bus bus;
++		if (!bus)
++		{
++			setError(error, "cannot connect to the system bus");
++			return false;
++		}
++
++		State state;
++		if (readState(bus.get(), state, CALL_TIMEOUT, error) < 0)
++			return false;
++
++		bool ok = true;
++		for (const auto& device : state.devices)
++			if (device.paired)
++				ok = removeDevice(bus.get(), device, error) && ok;
++
++		return ok;
++	}
++}
++
++#endif
+diff --git a/es-app/src/BluezBluetooth.h b/es-app/src/BluezBluetooth.h
+new file mode 100644
+index 0000000..65e6910
+--- /dev/null
++++ b/es-app/src/BluezBluetooth.h
+@@ -0,0 +1,64 @@
++#pragma once
++
++// Thin client of BlueZ (bluetoothd) over the D-Bus system bus, written on top of
++// sd-bus (libsystemd). It has no dependency on the rest of EmulationStation, so
++// ApiSystem can use it where upstream calls the batocera-bluetooth script.
++
++#if defined(HAVE_BLUEZ)
++
++#include <atomic>
++#include <chrono>
++#include <functional>
++#include <string>
++#include <vector>
++
++namespace Bluez
++{
++	struct Device
++	{
++		std::string path;                 // /org/bluez/hci0/dev_XX_XX_XX_XX_XX_XX
++		std::string address;              // XX:XX:XX:XX:XX:XX
++		std::string name;                 // Name property, empty when the device does not broadcast one
++		std::string alias;                // Alias property (what the user sees in other tools)
++		std::string icon;                 // Icon property (freedesktop icon name, e.g. input-gaming)
++		std::vector<std::string> uuids;
++
++		bool paired = false;
++		bool trusted = false;
++		bool connected = false;
++		bool hasRssi = false;             // BlueZ only keeps RSSI while the device is in range
++
++		std::string displayName() const;  // alias, else name, else address
++		bool isInput() const;             // gamepad, keyboard, mouse...
++		std::string guiType() const;      // icon name used by the menus: audio, joystick, keyboard, mouse, unknown
++	};
++
++	// bluetoothd answers on the system bus and there is at least one adapter.
++	bool isAvailable();
++
++	// State and power of the first adapter.
++	bool isPowered();
++	bool setPowered(bool powered, std::string* error = nullptr);
++
++	// Every device BlueZ knows about (paired and discovered).
++	std::vector<Device> listDevices();
++
++	// Scans until `stop` is set or `timeout` expires. `onPoll` receives the devices
++	// BlueZ knows about, about twice a second; it may block (to pair, for instance).
++	// The adapter is powered on if needed. Returns false when the scan could not start.
++	bool discover(std::chrono::seconds timeout, const std::atomic<bool>& stop,
++	              const std::function<void(const std::vector<Device>&)>& onPoll,
++	              std::string* error = nullptr);
++
++	// Pair (with a built-in agent that accepts everything and answers 0000 to PIN
++	// requests), trust and connect. Succeeds when the device ends up paired and trusted:
++	// a failed connection is not an error, a trusted device connects by itself later.
++	bool pair(const std::string& address, std::string* error = nullptr);
++
++	bool connect(const std::string& address, std::string* error = nullptr);
++	bool disconnect(const std::string& address, std::string* error = nullptr);
++	bool remove(const std::string& address, std::string* error = nullptr);
++	bool removeAllPaired(std::string* error = nullptr);
++}
++
++#endif
+diff --git a/es-app/src/guis/GuiControllersSettings.cpp b/es-app/src/guis/GuiControllersSettings.cpp
+index e334442..78db950 100644
+--- a/es-app/src/guis/GuiControllersSettings.cpp
++++ b/es-app/src/guis/GuiControllersSettings.cpp
+@@ -17,6 +17,10 @@
+ #include "ApiSystem.h"
+ #include "math/Misc.h"
+ 
++#if defined(HAVE_BLUEZ)
++#include "BluezBluetooth.h"
++#endif
++
+ #include <sstream>
+ 
+ #define gettext_controllers_settings				_("CONTROLLER SETTINGS")
+@@ -107,6 +111,29 @@ GuiControllersSettings::GuiControllersSettings(Window* wnd, int autoSel) : GuiSe
+ 	{
+ 		addGroup(_("BLUETOOTH"));
+ 
++#if defined(HAVE_BLUEZ) && !defined(BATOCERA)
++		// Bluetooth enable: the switch is the power state of the adapter itself, as BlueZ reports it
++		bool btPowered = Bluez::isPowered();
++		auto enable_bt = std::make_shared<SwitchComponent>(mWindow);
++		enable_bt->setState(btPowered);
++		addWithLabel(_("ENABLE BLUETOOTH"), enable_bt, autoSel == 2);
++		enable_bt->setOnChangedCallback([this, window, enable_bt, btPowered]
++		{
++			bool btEnabled = enable_bt->getState();
++			if (btEnabled != btPowered)
++			{
++				if (btEnabled)
++					ApiSystem::getInstance()->enableBluetooth();
++				else
++					ApiSystem::getInstance()->disableBluetooth();
++
++				Window* parent = window;
++				delete this;
++				openControllersSettings(parent, 2);
++			}
++		});
++#endif
++
+ #if defined(BATOCERA)
+ 		// Bluetooth enable
+ 		bool baseBtEnabled = SystemConf::getInstance()->getBool("controllers.bluetooth.enabled");
+@@ -152,7 +179,7 @@ GuiControllersSettings::GuiControllersSettings(Window* wnd, int autoSel) : GuiSe
+ 		// PAIR A BLUETOOTH CONTROLLER
+ 		addEntry(_("PAIR BLUETOOTH PADS AUTOMATICALLY"), false, [window] { ThreadedBluetooth::start(window); });
+ 
+-#if defined(BATOCERA) || defined(WIN32)
++#if defined(BATOCERA) || defined(WIN32) || defined(HAVE_BLUEZ)
+ 		// PAIR A BLUETOOTH CONTROLLER OR BT AUDIO DEVICE
+ 		addEntry(_("PAIR A BLUETOOTH DEVICE MANUALLY"), false, [window]
+ 		{

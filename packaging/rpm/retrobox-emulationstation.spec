@@ -18,6 +18,7 @@ URL:            https://github.com/manu-romero-411/retrobox-emulationstation
 ExclusiveArch:  x86_64 x86_64_v3 aarch64
 
 Requires:       retrobox-core
+Recommends:     bluez
 
 %description
 batocera-emulationstation built for a regular Linux desktop (desktop OpenGL,

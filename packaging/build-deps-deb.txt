@@ -27,3 +27,4 @@ libasound2-dev
 libssl-dev
 libfribidi-dev
 libudev-dev
+libsystemd-dev

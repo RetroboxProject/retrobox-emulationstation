@@ -79,6 +79,7 @@ its own is plain EmulationStation and keeps its data in `~/.emulationstation`.
 | `0005` | Take the executable path from `/proc/self/exe`, so the symlink in `/usr/bin` finds `resources/` and `locale/` |
 | `0006` | With `RETROBOX_ES_MENU_THEME` set to a file, write there on every game launch the resolved menu theme (colours, fonts with their pixel sizes, background, icons, the help prompts' style and icons, plus language and button settings) as JSON, for `retrobox-overlay` |
 | `0008` | Write that menu theme also once started, after the themes are reloaded and whenever the settings are saved, so the overlay is themed in EmulationStation too (before any game) and follows changes such as the confirm button or the 12-hour clock |
+| `0009` | Bluetooth through BlueZ (D-Bus, via sd-bus) instead of the `batocera-bluetooth` script, which does not exist on a desktop: pad auto-pairing, manual pairing (pads, headsets), device list with connect/disconnect/forget, and an adapter power switch. Needs `bluez` at run time (recommended by the package); without an adapter the Bluetooth entries stay hidden |
 
 They are split by topic so that when upstream drifts, the one that fails
 tells you where to look.

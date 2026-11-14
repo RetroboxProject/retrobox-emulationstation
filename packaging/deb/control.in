@@ -5,6 +5,7 @@ Priority: optional
 Architecture: @ARCH@
 Maintainer: Manu Romero <manu-romero-411@users.noreply.github.com>
 Depends: @DEPENDS@
+Recommends: bluez
 Homepage: https://github.com/manu-romero-411/retrobox-emulationstation
 Description: EmulationStation frontend, patched for Retrobox
  batocera-emulationstation built for a regular Linux desktop (desktop OpenGL,
