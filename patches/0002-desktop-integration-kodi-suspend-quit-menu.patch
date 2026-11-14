@@ -1,28 +1,47 @@
 diff --git a/es-app/src/ApiSystem.cpp b/es-app/src/ApiSystem.cpp
-index 2b35c84..6524b81 100644
+index 0ad2826..5162e9c 100644
 --- a/es-app/src/ApiSystem.cpp
 +++ b/es-app/src/ApiSystem.cpp
-@@ -591,8 +591,7 @@ bool ApiSystem::launchKodi(Window *window)
+@@ -50,6 +50,14 @@
+ #include <arpa/inet.h>
+ #endif
+ 
++// Retrobox keeps its scripts in its own tree, not in /usr/bin: retrobox-core
++// exports RETROBOX_ROOTDIR (and installs to /opt/retrobox by default).
++static std::string retroboxScript(const std::string& name)
++{
++	const char* root = getenv("RETROBOX_ROOTDIR");
++	return std::string(root != nullptr && *root != '\0' ? root : "/opt/retrobox") + "/bin/" + name;
++}
++
+ /*
+ #define script_config "batocera-config"; // canupdate, overscan enable, overscan disable, storage 'X', storage current, storage list, forgetBT, getRootPassword, lsoutputs
+ #define script_overclock "batocera-overclock"; // list, set X
+@@ -591,8 +599,11 @@ bool ApiSystem::launchKodi(Window *window)
  {
  	LOG(LogDebug) << "ApiSystem::launchKodi";
  
--	std::string commandline = InputManager::getInstance()->configureEmulators();
++	// retrobox-launch has configgen write Kodi's controller configuration, as for any
++	// game, and then run retrobox-kodi, which only starts the right Kodi
+ 	std::string commandline = InputManager::getInstance()->configureEmulators();
 -	std::string command = "batocera-kodi " + commandline;
-+	std::string command = "kodi";
++	std::string command = "\"" + retroboxScript("retrobox-launch") + "\" " + commandline +
++		" -system apps -emulator kodi -core kodi -rom config";
  
  	ApiSystem::launchExternalWindow_before(window);
  
-@@ -2175,8 +2174,7 @@ bool ApiSystem::isScriptingSupported(ScriptId script)
+@@ -2209,8 +2220,8 @@ bool ApiSystem::isScriptingSupported(ScriptId script)
  #endif
  		break;
  	case ApiSystem::KODI:
 -		executables.push_back("kodi");
 -		break;
-+		return executeScript("command -v kodi > /dev/null 2>&1");
++		// retrobox-kodi finds the Kodi to start: the Flatpak first, then a native one
++		return executeScript("\"" + retroboxScript("retrobox-kodi") + "\" --check");
  	case ApiSystem::WIFI:
  		executables.push_back("batocera-wifi");
  		break;
-@@ -2212,7 +2210,8 @@ bool ApiSystem::isScriptingSupported(ScriptId script)
+@@ -2246,7 +2257,8 @@ bool ApiSystem::isScriptingSupported(ScriptId script)
  		executables.push_back("batocera-padsinfo");
  		break;
  	case ApiSystem::EVMAPY:
@@ -32,7 +51,7 @@ index 2b35c84..6524b81 100644
  		break;
  	case ApiSystem::BATOCERAPREGAMELISTSHOOK:
  		executables.push_back("batocera-preupdate-gamelists-hook");
-@@ -2239,7 +2238,7 @@ bool ApiSystem::isScriptingSupported(ScriptId script)
+@@ -2273,7 +2285,7 @@ bool ApiSystem::isScriptingSupported(ScriptId script)
  		executables.push_back("batocera-upgrade-torrent");
  		break;
  	case ApiSystem::SUSPEND:
@@ -41,7 +60,7 @@ index 2b35c84..6524b81 100644
  	case ApiSystem::VERSIONINFO:
  		executables.push_back("batocera-version");
  		break;
-@@ -2759,7 +2758,7 @@ bool ApiSystem::emuKill()
+@@ -2793,7 +2805,7 @@ bool ApiSystem::emuKill()
  void ApiSystem::suspend()
  {
  	LOG(LogDebug) << "ApiSystem::suspend";
@@ -51,7 +70,7 @@ index 2b35c84..6524b81 100644
  
  void ApiSystem::replugControllers_sindenguns()
 diff --git a/es-app/src/guis/GuiMenu.cpp b/es-app/src/guis/GuiMenu.cpp
-index 7cc6ec7..3d758a6 100644
+index 75b4f69..0da003e 100644
 --- a/es-app/src/guis/GuiMenu.cpp
 +++ b/es-app/src/guis/GuiMenu.cpp
 @@ -220,11 +220,7 @@ GuiMenu::GuiMenu(Window *window, bool animate) : GuiComponent(window), mMenu(win
@@ -102,7 +121,7 @@ index 7cc6ec7..3d758a6 100644
  			if (system(cmd.c_str()) == 0) {
  				SystemConf::getInstance()->set("system.kblayout", selLayout);
  				SystemConf::getInstance()->set("system.kbvariant", selVariant);
-@@ -4746,13 +4742,13 @@ void GuiMenu::openQuitMenu()
+@@ -4752,13 +4748,13 @@ void GuiMenu::openQuitMenu()
  
  void GuiMenu::openQuitMenu_static(Window *window, bool quickAccessMenu, bool animate)
  {
@@ -119,7 +138,7 @@ index 7cc6ec7..3d758a6 100644
  
  	auto s = new GuiSettings(window, (quickAccessMenu ? _("QUICK ACCESS") : _("QUIT")).c_str());
  	s->setCloseButton("select");
-@@ -4907,7 +4903,6 @@ void GuiMenu::openQuitMenu_static(Window *window, bool quickAccessMenu, bool ani
+@@ -4913,7 +4909,6 @@ void GuiMenu::openQuitMenu_static(Window *window, bool quickAccessMenu, bool ani
  			_("NO"), nullptr));
  	}, "iconFastShutdown");
  
@@ -127,7 +146,7 @@ index 7cc6ec7..3d758a6 100644
  	if (Settings::getInstance()->getBool("ShowExit"))
  	{
  		s->addEntry(_("QUIT EMULATIONSTATION"), false, [window] {
-@@ -4916,7 +4911,6 @@ void GuiMenu::openQuitMenu_static(Window *window, bool quickAccessMenu, bool ani
+@@ -4922,7 +4917,6 @@ void GuiMenu::openQuitMenu_static(Window *window, bool quickAccessMenu, bool ani
  				_("NO"), nullptr));
  		}, "iconQuit");
  	}

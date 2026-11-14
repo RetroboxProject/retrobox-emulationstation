@@ -73,7 +73,7 @@ its own is plain EmulationStation and keeps its data in `~/.emulationstation`.
 | Patch | What it does |
 |-------|--------------|
 | `0001` | Window title, `.gitignore` for generated locale files |
-| `0002` | Desktop integration in `ApiSystem`/`GuiMenu`/`Settings` (Kodi, suspend, quit menu, quit entry shown by default) |
+| `0002` | Desktop integration in `ApiSystem`/`GuiMenu`/`Settings` (Kodi, suspend, quit menu, quit entry shown by default). The Kodi menu entry is shown when `$RETROBOX_ROOTDIR/bin/retrobox-kodi --check` succeeds and starts Kodi through `retrobox-launch` (`-system apps -emulator kodi -rom config`), so configgen writes its controller configuration; `retrobox-kodi` then starts the Flatpak or the native Kodi. Also holds the `retroboxScript()` helper (`$RETROBOX_ROOTDIR/bin/<name>`) |
 | `0003` | Null-safety for the gamelist cursor |
 | `0004` | Shutdown/reboot through KDE |
 | `0005` | Take the executable path from `/proc/self/exe`, so the symlink in `/usr/bin` finds `resources/` and `locale/` |

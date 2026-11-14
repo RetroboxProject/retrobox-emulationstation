@@ -1,19 +1,11 @@
 diff --git a/es-app/src/ApiSystem.cpp b/es-app/src/ApiSystem.cpp
-index 6a9e796..614c05a 100644
+index 5162e9c..10e7e83 100644
 --- a/es-app/src/ApiSystem.cpp
 +++ b/es-app/src/ApiSystem.cpp
-@@ -50,6 +50,25 @@
- #include <arpa/inet.h>
- #endif
+@@ -58,6 +58,17 @@ static std::string retroboxScript(const std::string& name)
+ 	return std::string(root != nullptr && *root != '\0' ? root : "/opt/retrobox") + "/bin/" + name;
+ }
  
-+// Retrobox keeps its scripts in its own tree, not in /usr/bin: retrobox-core
-+// exports RETROBOX_ROOTDIR (and installs to /opt/retrobox by default).
-+static std::string retroboxScript(const std::string& name)
-+{
-+	const char* root = getenv("RETROBOX_ROOTDIR");
-+	return std::string(root != nullptr && *root != '\0' ? root : "/opt/retrobox") + "/bin/" + name;
-+}
-+
 +// The 7-Zip command line tool goes by different names: 7zr (p7zip, 7zip in Debian),
 +// 7za (p7zip), 7zz (7zip in Fedora) or 7z.
 +static std::string findSevenZip()
@@ -28,7 +20,7 @@ index 6a9e796..614c05a 100644
  /*
  #define script_config "batocera-config"; // canupdate, overscan enable, overscan disable, storage 'X', storage current, storage list, forgetBT, getRootPassword, lsoutputs
  #define script_overclock "batocera-overclock"; // list, set X
-@@ -2295,8 +2314,20 @@ bool ApiSystem::isScriptingSupported(ScriptId script)
+@@ -2308,8 +2319,20 @@ bool ApiSystem::isScriptingSupported(ScriptId script)
  		return true;
  
  	for (auto executable : executables)
@@ -50,7 +42,7 @@ index 6a9e796..614c05a 100644
  
  	return true;
  }
-@@ -2481,7 +2512,7 @@ std::vector<PacmanPackage> ApiSystem::getBatoceraStorePackages()
+@@ -2494,7 +2517,7 @@ std::vector<PacmanPackage> ApiSystem::getBatoceraStorePackages()
  
  	LOG(LogDebug) << "ApiSystem::getBatoceraStorePackages";
  
@@ -59,7 +51,7 @@ index 6a9e796..614c05a 100644
  	std::string data = Utils::String::join(res, "\n");
  	if (data.empty())
  	{
-@@ -2550,18 +2581,18 @@ std::vector<PacmanPackage> ApiSystem::getBatoceraStorePackages()
+@@ -2563,18 +2586,18 @@ std::vector<PacmanPackage> ApiSystem::getBatoceraStorePackages()
  
  std::pair<std::string, int> ApiSystem::installBatoceraStorePackage(std::string name, const std::function<void(const std::string)>& func)
  {
@@ -82,7 +74,7 @@ index 6a9e796..614c05a 100644
  }
  
  void ApiSystem::callBatoceraPreGameListsHook()
-@@ -2571,7 +2602,12 @@ void ApiSystem::callBatoceraPreGameListsHook()
+@@ -2584,7 +2607,12 @@ void ApiSystem::callBatoceraPreGameListsHook()
  
  void ApiSystem::updateBatoceraStorePackageList()
  {
