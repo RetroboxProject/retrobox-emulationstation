@@ -1,0 +1,160 @@
+diff --git a/es-app/src/guis/GuiMenu.cpp b/es-app/src/guis/GuiMenu.cpp
+index 3df44f8..7aee63f 100644
+--- a/es-app/src/guis/GuiMenu.cpp
++++ b/es-app/src/guis/GuiMenu.cpp
+@@ -1436,9 +1436,12 @@ void GuiMenu::openSystemSettings()
+ 	// language choice
+ 	auto language_choice = std::make_shared<OptionListComponent<std::string> >(window, _("LANGUAGE"), false);
+ 
+-	std::string language = SystemConf::getInstance()->get("system.language");
+-	if (language.empty())
+-		language = "en_US";
++	// retrobox: "auto" follows the system language; only an explicit choice is stored
++	std::string language = SystemConf::getInstance()->getStored("system.language");
++	if (language == "auto")
++		language.clear();
++
++	language_choice->add(_("AUTO") + " (" + SystemConf::getInstance()->get("system.language") + ")", "auto", language.empty());
+ 
+ 	if(EsLocale::isRTL()) {
+ 	  language_choice->add("العربية", "ar_YE", language == "ar_YE");
+@@ -1498,7 +1501,8 @@ void GuiMenu::openSystemSettings()
+ 	});
+ 
+ 	// Keyboard layout & variant
+-#if !WIN32
++	// retrobox: the keyboard layout belongs to the system (desktop session), not to the frontend
++#if !WIN32 && defined(RETROBOX_KEYBOARD_MENU)
+ 
+ 	std::string curLayout = SystemConf::getInstance()->get("system.kblayout");
+ 	if (curLayout.empty()) curLayout = "us";
+diff --git a/es-app/src/main.cpp b/es-app/src/main.cpp
+index 26900ea..29bf7f1 100644
+--- a/es-app/src/main.cpp
++++ b/es-app/src/main.cpp
+@@ -362,10 +362,15 @@ int setLocale(char * argv1)
+ #if WIN32
+ 	std::locale::global(std::locale("en-US"));
+ #else
++	// retrobox: an explicit language wins; "auto" (empty) leaves the system's locale alone
++	std::string wanted = SystemConf::getInstance()->getStored("system.language");
++	if (wanted == "auto")
++		wanted.clear();
++
+ 	if (Utils::FileSystem::exists("./locale/lang")) // for local builds
+-		EsLocale::init("", "./locale/lang");	
++		EsLocale::init(wanted, "./locale/lang");	
+ 	else
+-		EsLocale::init("", "/usr/share/locale");	
++		EsLocale::init(wanted, "/usr/share/locale");	
+ #endif
+ 
+ 	setlocale(LC_TIME, "");
+diff --git a/es-core/src/Settings.cpp b/es-core/src/Settings.cpp
+index 12c7cc6..7d68718 100644
+--- a/es-core/src/Settings.cpp
++++ b/es-core/src/Settings.cpp
+@@ -169,7 +169,7 @@ void Settings::setDefaults()
+ 	mBoolMap["ShowControllerBattery"] = Settings::_ShowControllerBattery;
+     mIntMap["SystemVolume"] = 95;
+     mBoolMap["Overscan"] = false;
+-    mStringMap["Language"] = "en_US";
++    mStringMap["Language"] = ""; // retrobox: empty = auto (system language)
+     mStringMap["INPUT P1"] = "DEFAULT";
+     mStringMap["INPUT P2"] = "DEFAULT";
+     mStringMap["INPUT P3"] = "DEFAULT";
+diff --git a/es-core/src/SystemConf.cpp b/es-core/src/SystemConf.cpp
+index def6734..20b2c2b 100644
+--- a/es-core/src/SystemConf.cpp
++++ b/es-core/src/SystemConf.cpp
+@@ -7,6 +7,7 @@
+ #include "Settings.h"
+ #include "Paths.h"
+ 
++#include <cstdlib>
+ #include <set>
+ #include <regex>
+ #include <string>
+@@ -21,6 +22,35 @@ static std::string mapSettingsName(const std::string& name)
+ 	return name;
+ }
+ 
++// retrobox: language used when "system.language" is not set explicitly ("auto"):
++// the first usable locale of the environment (LANGUAGE, LC_ALL, LC_MESSAGES, LANG).
++static std::string detectSystemLanguage()
++{
++	for (const char* var : { "LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG" })
++	{
++		const char* value = getenv(var);
++		if (value == nullptr)
++			continue;
++
++		// LANGUAGE is a colon-separated list of preferences
++		for (const std::string& token : Utils::String::split(value, ':'))
++		{
++			std::string code = token.substr(0, token.find_first_of(".@"));
++			if (code.empty() || code == "C" || code == "POSIX")
++				continue;
++
++			return code;
++		}
++	}
++
++	return "en_US";
++}
++
++static bool isAutoLanguage(const std::string& value)
++{
++	return value.empty() || value == "auto";
++}
++
+ SystemConf *SystemConf::sInstance = NULL;
+ 
+ static std::set<std::string> dontRemoveValue
+@@ -208,11 +238,11 @@ bool SystemConf::saveSystemConf()
+ 	return true;
+ }
+ 
+-std::string SystemConf::get(const std::string &name) 
++std::string SystemConf::getStored(const std::string &name)
+ {
+ 	if (mSystemConfFile.empty())
+ 		return Settings::getInstance()->getString(mapSettingsName(name));
+-	
++
+ 	auto it = confMap.find(name);
+ 	if (it != confMap.cend())
+ 		return it->second;
+@@ -221,7 +251,18 @@ std::string SystemConf::get(const std::string &name)
+ 	if (dit != defaults.cend())
+ 		return dit->second;
+ 
+-    return "";
++	return "";
++}
++
++std::string SystemConf::get(const std::string &name) 
++{
++	std::string value = getStored(name);
++
++	// retrobox: an unset language means "follow the system", not a fixed default
++	if (name == "system.language" && isAutoLanguage(value))
++		return detectSystemLanguage();
++
++	return value;
+ }
+ 
+ std::vector<std::string> SystemConf::getKeysStartingWith(const std::string &prefix)
+diff --git a/es-core/src/SystemConf.h b/es-core/src/SystemConf.h
+index ab0698d..9551e42 100644
+--- a/es-core/src/SystemConf.h
++++ b/es-core/src/SystemConf.h
+@@ -19,6 +19,8 @@ public:
+     bool saveSystemConf();
+ 
+     std::string get(const std::string &name);
++	// retrobox: the value as stored, without resolving "auto" (system.language)
++	std::string getStored(const std::string &name);
+ 	std::vector<std::string> getKeysStartingWith(const std::string &prefix);
+     bool set(const std::string &name, const std::string &value);
+ 
