@@ -19,6 +19,8 @@ ExclusiveArch:  x86_64 x86_64_v3 aarch64
 
 Requires:       retrobox-core
 Recommends:     bluez
+Recommends:     NetworkManager
+Recommends:     NetworkManager-wifi
 
 %description
 batocera-emulationstation built for a regular Linux desktop (desktop OpenGL,

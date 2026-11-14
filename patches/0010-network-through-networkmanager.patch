@@ -1,0 +1,1715 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 8e56275..4ab5bed 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -241,8 +241,8 @@ if(NOT WIN32)
+ 	  pkg_check_modules(SDBUS QUIET libsystemd)
+ 	endif()
+ 	if(SDBUS_FOUND)
+-	  MESSAGE("sd-bus found. Bluetooth through BlueZ enabled")
+-	  add_definitions(-DHAVE_BLUEZ)
++	  MESSAGE("sd-bus found. Bluetooth through BlueZ and network through NetworkManager enabled")
++	  add_definitions(-DHAVE_BLUEZ -DHAVE_NETWORKMANAGER)
+ 	else()
+ 	  MESSAGE("sd-bus not found. Bluetooth will use the batocera-bluetooth script")
+ 	endif()
+diff --git a/es-app/CMakeLists.txt b/es-app/CMakeLists.txt
+index c3e75d7..4479bed 100644
+--- a/es-app/CMakeLists.txt
++++ b/es-app/CMakeLists.txt
+@@ -138,6 +138,9 @@ set(ES_HEADERS
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/Win32ApiSystem.h # batocera
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/BluezApiSystem.h
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/BluezBluetooth.h
++    ${CMAKE_CURRENT_SOURCE_DIR}/src/NetworkManagerClient.h
++    ${CMAKE_CURRENT_SOURCE_DIR}/src/guis/GuiNetworkSettings.h
++    ${CMAKE_CURRENT_SOURCE_DIR}/src/guis/GuiNetworkWifi.h
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/RetroboxMenuTheme.h # retrobox
+ )
+ 
+@@ -243,6 +246,9 @@ set(ES_SOURCES
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/Win32ApiSystem.cpp # batocera
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/BluezApiSystem.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/BluezBluetooth.cpp
++	${CMAKE_CURRENT_SOURCE_DIR}/src/NetworkManagerClient.cpp
++	${CMAKE_CURRENT_SOURCE_DIR}/src/guis/GuiNetworkSettings.cpp
++	${CMAKE_CURRENT_SOURCE_DIR}/src/guis/GuiNetworkWifi.cpp
+ )
+ 
+ #-------------------------------------------------------------------------------
+diff --git a/es-app/src/NetworkManagerClient.cpp b/es-app/src/NetworkManagerClient.cpp
+new file mode 100644
+index 0000000..63783f9
+--- /dev/null
++++ b/es-app/src/NetworkManagerClient.cpp
+@@ -0,0 +1,1081 @@
++#if defined(HAVE_NETWORKMANAGER)
++
++#include "NetworkManagerClient.h"
++
++#include <systemd/sd-bus.h>
++
++#include <algorithm>
++#include <chrono>
++#include <cstdint>
++#include <cstdlib>
++#include <map>
++#include <thread>
++
++namespace NetworkManager
++{
++	namespace
++	{
++		const char* const NM_SERVICE = "org.freedesktop.NetworkManager";
++		const char* const NM_PATH = "/org/freedesktop/NetworkManager";
++		const char* const NM_IFACE = "org.freedesktop.NetworkManager";
++		const char* const DEVICE_IFACE = "org.freedesktop.NetworkManager.Device";
++		const char* const WIRELESS_IFACE = "org.freedesktop.NetworkManager.Device.Wireless";
++		const char* const AP_IFACE = "org.freedesktop.NetworkManager.AccessPoint";
++		const char* const ACTIVE_IFACE = "org.freedesktop.NetworkManager.Connection.Active";
++		const char* const IP4_IFACE = "org.freedesktop.NetworkManager.IP4Config";
++		const char* const SETTINGS_PATH = "/org/freedesktop/NetworkManager/Settings";
++		const char* const SETTINGS_IFACE = "org.freedesktop.NetworkManager.Settings";
++		const char* const PROFILE_IFACE = "org.freedesktop.NetworkManager.Settings.Connection";
++		const char* const PROPERTIES_IFACE = "org.freedesktop.DBus.Properties";
++
++		// NMDeviceType
++		constexpr uint32_t TYPE_ETHERNET = 1;
++		constexpr uint32_t TYPE_WIFI = 2;
++
++		// NMDeviceState
++		constexpr uint32_t STATE_UNMANAGED = 10;
++		constexpr uint32_t STATE_UNAVAILABLE = 20;
++		constexpr uint32_t STATE_DISCONNECTED = 30;
++		constexpr uint32_t STATE_ACTIVATED = 100;
++		constexpr uint32_t STATE_FAILED = 120;
++
++		// NMActiveConnectionState
++		constexpr uint32_t ACTIVE_ACTIVATED = 2;
++
++		// NM80211ApFlags / NM80211ApSecurityFlags
++		constexpr uint32_t AP_FLAG_PRIVACY = 0x1;
++		constexpr uint32_t SEC_KEY_MGMT_PSK = 0x100;
++		constexpr uint32_t SEC_KEY_MGMT_SAE = 0x400;
++
++		constexpr uint64_t USEC = 1000000ULL;
++		constexpr uint64_t PROBE_TIMEOUT = 5 * USEC;
++		constexpr uint64_t CALL_TIMEOUT = 30 * USEC;
++
++		// ---------------------------------------------------------------- helpers
++
++		class Bus
++		{
++		public:
++			explicit Bus(uint64_t timeout = CALL_TIMEOUT)
++			{
++				if (sd_bus_open_system(&mBus) < 0)
++					mBus = nullptr;
++				else
++					sd_bus_set_method_call_timeout(mBus, timeout);
++			}
++			~Bus() { if (mBus != nullptr) sd_bus_flush_close_unref(mBus); }
++			Bus(const Bus&) = delete;
++			Bus& operator=(const Bus&) = delete;
++
++			sd_bus* get() const { return mBus; }
++			explicit operator bool() const { return mBus != nullptr; }
++
++		private:
++			sd_bus* mBus = nullptr;
++		};
++
++		class Error
++		{
++		public:
++			Error() = default;
++			~Error() { sd_bus_error_free(&mError); }
++			Error(const Error&) = delete;
++			Error& operator=(const Error&) = delete;
++
++			sd_bus_error* get() { return &mError; }
++			std::string text(int code) const
++			{
++				if (sd_bus_error_is_set(&mError))
++					return std::string(mError.name != nullptr ? mError.name : "error") + ": " + (mError.message != nullptr ? mError.message : "");
++
++				return std::string("error ") + std::to_string(code);
++			}
++
++		private:
++			sd_bus_error mError = SD_BUS_ERROR_NULL;
++		};
++
++		class Message
++		{
++		public:
++			Message() = default;
++			~Message() { sd_bus_message_unref(mMessage); }
++			Message(const Message&) = delete;
++			Message& operator=(const Message&) = delete;
++
++			sd_bus_message** out() { return &mMessage; }
++			sd_bus_message* get() const { return mMessage; }
++
++		private:
++			sd_bus_message* mMessage = nullptr;
++		};
++
++		void setError(std::string* target, const std::string& text)
++		{
++			if (target != nullptr)
++				*target = text;
++		}
++
++		// ------------------------------------------------------------ properties
++
++		bool getU32(sd_bus* bus, const std::string& path, const char* iface, const char* name, uint32_t& value)
++		{
++			Error error;
++			return sd_bus_get_property_trivial(bus, NM_SERVICE, path.c_str(), iface, name, error.get(), 'u', &value) >= 0;
++		}
++
++		bool getBool(sd_bus* bus, const std::string& path, const char* iface, const char* name, bool& value)
++		{
++			Error error;
++			int flag = 0;
++			if (sd_bus_get_property_trivial(bus, NM_SERVICE, path.c_str(), iface, name, error.get(), 'b', &flag) < 0)
++				return false;
++
++			value = flag != 0;
++			return true;
++		}
++
++		bool getInt64(sd_bus* bus, const std::string& path, const char* iface, const char* name, int64_t& value)
++		{
++			Error error;
++			return sd_bus_get_property_trivial(bus, NM_SERVICE, path.c_str(), iface, name, error.get(), 'x', &value) >= 0;
++		}
++
++		// Properties of type 's' (the default) or 'o'. sd_bus_get_property_string() only reads 's'.
++		bool getString(sd_bus* bus, const std::string& path, const char* iface, const char* name, std::string& value, const char* type = "s")
++		{
++			Error error;
++			Message reply;
++			if (sd_bus_get_property(bus, NM_SERVICE, path.c_str(), iface, name, error.get(), reply.out(), type) < 0)
++				return false;
++
++			const char* text = nullptr;
++			if (sd_bus_message_read(reply.get(), type, &text) < 0)
++				return false;
++
++			value = text != nullptr ? text : "";
++			return true;
++		}
++
++		bool hasObject(const std::string& path)
++		{
++			return !path.empty() && path != "/";
++		}
++
++		bool callSimple(sd_bus* bus, const std::string& path, const char* iface, const char* member, std::string* errorText)
++		{
++			Error error;
++			int r = sd_bus_call_method(bus, NM_SERVICE, path.c_str(), iface, member, error.get(), nullptr, "");
++			if (r < 0)
++			{
++				setError(errorText, error.text(r));
++				return false;
++			}
++
++			return true;
++		}
++
++		// ------------------------------------------------------------- devices
++
++		struct Device
++		{
++			std::string path;
++			std::string iface;
++			uint32_t type = 0;
++			uint32_t state = 0;
++			bool managed = true;
++		};
++
++		std::vector<Device> readDevices(sd_bus* bus)
++		{
++			std::vector<Device> devices;
++
++			Error error;
++			Message reply;
++			if (sd_bus_call_method(bus, NM_SERVICE, NM_PATH, NM_IFACE, "GetDevices", error.get(), reply.out(), "") < 0)
++				return devices;
++
++			sd_bus_message* m = reply.get();
++			if (sd_bus_message_enter_container(m, 'a', "o") < 0)
++				return devices;
++
++			std::vector<std::string> paths;
++			const char* item = nullptr;
++			while (sd_bus_message_read(m, "o", &item) > 0)
++				paths.push_back(item != nullptr ? item : "");
++
++			for (const auto& path : paths)
++			{
++				Device device;
++				device.path = path;
++
++				if (!getU32(bus, path, DEVICE_IFACE, "DeviceType", device.type))
++					continue;
++
++				getU32(bus, path, DEVICE_IFACE, "State", device.state);
++				getString(bus, path, DEVICE_IFACE, "Interface", device.iface);
++				getBool(bus, path, DEVICE_IFACE, "Managed", device.managed);
++				devices.push_back(device);
++			}
++
++			return devices;
++		}
++
++		bool findDevice(sd_bus* bus, uint32_t type, Device& found)
++		{
++			for (const auto& device : readDevices(bus))
++				if (device.type == type && device.managed && device.state != STATE_UNMANAGED)
++				{
++					found = device;
++					return true;
++				}
++
++			return false;
++		}
++
++		// First address of an IP4Config object: AddressData is aa{sv}
++		std::string readIp(sd_bus* bus, const std::string& deviceOrConfigPath, bool isDevice)
++		{
++			std::string configPath = deviceOrConfigPath;
++			if (isDevice && (!getString(bus, deviceOrConfigPath, DEVICE_IFACE, "Ip4Config", configPath, "o") || !hasObject(configPath)))
++				return std::string();
++
++			Error error;
++			Message reply;
++			if (sd_bus_get_property(bus, NM_SERVICE, configPath.c_str(), IP4_IFACE, "AddressData", error.get(), reply.out(), "aa{sv}") < 0)
++				return std::string();
++
++			sd_bus_message* m = reply.get();
++			if (sd_bus_message_enter_container(m, 'a', "a{sv}") < 0)
++				return std::string();
++
++			std::string address;
++			int r = 0;
++			while (address.empty() && (r = sd_bus_message_enter_container(m, 'a', "{sv}")) > 0)
++			{
++				while ((r = sd_bus_message_enter_container(m, 'e', "sv")) > 0)
++				{
++					const char* key = nullptr;
++					if (sd_bus_message_read(m, "s", &key) < 0)
++						return address;
++
++					char type = 0;
++					const char* contents = nullptr;
++					if (sd_bus_message_peek_type(m, &type, &contents) < 0)
++						return address;
++
++					// sd-bus reuses the buffer behind `contents` as soon as the variant is entered.
++					const std::string signature = contents != nullptr ? contents : "";
++					const std::string name = key != nullptr ? key : "";
++
++					if (sd_bus_message_enter_container(m, 'v', signature.c_str()) < 0)
++						return address;
++
++					if (name == "address" && signature == "s")
++					{
++						const char* text = nullptr;
++						if (sd_bus_message_read(m, "s", &text) >= 0 && text != nullptr && address.empty())
++							address = text;
++					}
++					else if (sd_bus_message_skip(m, signature.c_str()) < 0)
++						return address;
++
++					if (sd_bus_message_exit_container(m) < 0 || sd_bus_message_exit_container(m) < 0)
++						return address;
++				}
++
++				if (r < 0 || sd_bus_message_exit_container(m) < 0)
++					return address;
++			}
++
++			return address;
++		}
++
++		// ---------------------------------------------------------- access points
++
++		struct RawAccessPoint
++		{
++			std::string path;
++			std::string ssid;
++			int strength = 0;
++			uint32_t flags = 0;
++			uint32_t wpaFlags = 0;
++			uint32_t rsnFlags = 0;
++		};
++
++		enum class Security { Open, Psk, Sae, Unsupported };
++
++		Security classify(const RawAccessPoint& ap)
++		{
++			const uint32_t both = ap.wpaFlags | ap.rsnFlags;
++
++			if ((ap.flags & AP_FLAG_PRIVACY) == 0 && both == 0)
++				return Security::Open;
++
++			if (both & SEC_KEY_MGMT_PSK)
++				return Security::Psk;   // includes WPA2/WPA3 transition networks
++
++			if (ap.rsnFlags & SEC_KEY_MGMT_SAE)
++				return Security::Sae;
++
++			// WPA-Enterprise and WEP (privacy flag without WPA/RSN) cannot be set up from here
++			return Security::Unsupported;
++		}
++
++		// Properties.GetAll of an access point: a{sv}
++		bool readAccessPoint(sd_bus* bus, const std::string& path, RawAccessPoint& ap)
++		{
++			Error error;
++			Message reply;
++			if (sd_bus_call_method(bus, NM_SERVICE, path.c_str(), PROPERTIES_IFACE, "GetAll", error.get(), reply.out(), "s", AP_IFACE) < 0)
++				return false;
++
++			sd_bus_message* m = reply.get();
++			ap.path = path;
++
++			if (sd_bus_message_enter_container(m, 'a', "{sv}") < 0)
++				return false;
++
++			int r = 0;
++			while ((r = sd_bus_message_enter_container(m, 'e', "sv")) > 0)
++			{
++				const char* key = nullptr;
++				if (sd_bus_message_read(m, "s", &key) < 0)
++					return false;
++
++				char type = 0;
++				const char* contents = nullptr;
++				if (sd_bus_message_peek_type(m, &type, &contents) < 0)
++					return false;
++
++				const std::string signature = contents != nullptr ? contents : "";
++				const std::string name = key != nullptr ? key : "";
++
++				if (sd_bus_message_enter_container(m, 'v', signature.c_str()) < 0)
++					return false;
++
++				if (name == "Ssid" && signature == "ay")
++				{
++					const void* data = nullptr;
++					size_t size = 0;
++					if (sd_bus_message_read_array(m, 'y', &data, &size) < 0)
++						return false;
++
++					ap.ssid.assign(static_cast<const char*>(data), size);
++				}
++				else if (name == "Strength" && signature == "y")
++				{
++					uint8_t strength = 0;
++					if (sd_bus_message_read(m, "y", &strength) < 0)
++						return false;
++
++					ap.strength = strength;
++				}
++				else if ((name == "Flags" || name == "WpaFlags" || name == "RsnFlags") && signature == "u")
++				{
++					uint32_t value = 0;
++					if (sd_bus_message_read(m, "u", &value) < 0)
++						return false;
++
++					if (name == "Flags") ap.flags = value;
++					else if (name == "WpaFlags") ap.wpaFlags = value;
++					else ap.rsnFlags = value;
++				}
++				else if (sd_bus_message_skip(m, signature.c_str()) < 0)
++					return false;
++
++				if (sd_bus_message_exit_container(m) < 0 || sd_bus_message_exit_container(m) < 0)
++					return false;
++			}
++
++			return r >= 0;
++		}
++
++		std::vector<RawAccessPoint> readAccessPoints(sd_bus* bus, const std::string& devicePath)
++		{
++			std::vector<RawAccessPoint> result;
++
++			Error error;
++			Message reply;
++			if (sd_bus_call_method(bus, NM_SERVICE, devicePath.c_str(), WIRELESS_IFACE, "GetAllAccessPoints", error.get(), reply.out(), "") < 0)
++				return result;
++
++			sd_bus_message* m = reply.get();
++			if (sd_bus_message_enter_container(m, 'a', "o") < 0)
++				return result;
++
++			std::vector<std::string> paths;
++			const char* item = nullptr;
++			while (sd_bus_message_read(m, "o", &item) > 0)
++				paths.push_back(item != nullptr ? item : "");
++
++			for (const auto& path : paths)
++			{
++				RawAccessPoint ap;
++				if (readAccessPoint(bus, path, ap) && !ap.ssid.empty())   // hidden networks have no SSID to show
++					result.push_back(ap);
++			}
++
++			return result;
++		}
++
++		void requestScan(sd_bus* bus, const std::string& devicePath)
++		{
++			int64_t before = 0;
++			getInt64(bus, devicePath, WIRELESS_IFACE, "LastScan", before);
++
++			Error error;
++			Message call;
++			if (sd_bus_message_new_method_call(bus, call.out(), NM_SERVICE, devicePath.c_str(), WIRELESS_IFACE, "RequestScan") < 0
++				|| sd_bus_message_append(call.get(), "a{sv}", 0) < 0)
++				return;
++
++			// A refused scan (NetworkManager limits how often it is allowed) just means the results are recent enough.
++			if (sd_bus_call(bus, call.get(), 0, error.get(), nullptr) < 0)
++				return;
++
++			const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
++			while (std::chrono::steady_clock::now() < deadline)
++			{
++				int64_t now = before;
++				if (getInt64(bus, devicePath, WIRELESS_IFACE, "LastScan", now) && now != before)
++					return;
++
++				std::this_thread::sleep_for(std::chrono::milliseconds(300));
++			}
++		}
++
++		// ---------------------------------------------------------------- profiles
++
++		struct Profile
++		{
++			std::string path;
++			std::string type;
++			std::string ssid;
++		};
++
++		// Settings.Connection.GetSettings: a{sa{sv}}. Only what identifies a wifi profile is kept.
++		bool readProfile(sd_bus* bus, const std::string& path, Profile& profile)
++		{
++			Error error;
++			Message reply;
++			if (sd_bus_call_method(bus, NM_SERVICE, path.c_str(), PROFILE_IFACE, "GetSettings", error.get(), reply.out(), "") < 0)
++				return false;
++
++			sd_bus_message* m = reply.get();
++			profile.path = path;
++
++			if (sd_bus_message_enter_container(m, 'a', "{sa{sv}}") < 0)
++				return false;
++
++			int r = 0;
++			while ((r = sd_bus_message_enter_container(m, 'e', "sa{sv}")) > 0)
++			{
++				const char* section = nullptr;
++				if (sd_bus_message_read(m, "s", &section) < 0)
++					return false;
++
++				const std::string sectionName = section != nullptr ? section : "";
++
++				if (sd_bus_message_enter_container(m, 'a', "{sv}") < 0)
++					return false;
++
++				while ((r = sd_bus_message_enter_container(m, 'e', "sv")) > 0)
++				{
++					const char* key = nullptr;
++					if (sd_bus_message_read(m, "s", &key) < 0)
++						return false;
++
++					char type = 0;
++					const char* contents = nullptr;
++					if (sd_bus_message_peek_type(m, &type, &contents) < 0)
++						return false;
++
++					const std::string signature = contents != nullptr ? contents : "";
++					const std::string name = key != nullptr ? key : "";
++
++					if (sd_bus_message_enter_container(m, 'v', signature.c_str()) < 0)
++						return false;
++
++					if (sectionName == "connection" && name == "type" && signature == "s")
++					{
++						const char* text = nullptr;
++						if (sd_bus_message_read(m, "s", &text) < 0)
++							return false;
++
++						profile.type = text != nullptr ? text : "";
++					}
++					else if (sectionName == "802-11-wireless" && name == "ssid" && signature == "ay")
++					{
++						const void* data = nullptr;
++						size_t size = 0;
++						if (sd_bus_message_read_array(m, 'y', &data, &size) < 0)
++							return false;
++
++						profile.ssid.assign(static_cast<const char*>(data), size);
++					}
++					else if (sd_bus_message_skip(m, signature.c_str()) < 0)
++						return false;
++
++					if (sd_bus_message_exit_container(m) < 0 || sd_bus_message_exit_container(m) < 0)
++						return false;
++				}
++
++				if (r < 0 || sd_bus_message_exit_container(m) < 0 || sd_bus_message_exit_container(m) < 0)
++					return false;
++			}
++
++			return r >= 0;
++		}
++
++		std::vector<Profile> wifiProfiles(sd_bus* bus)
++		{
++			std::vector<Profile> profiles;
++
++			Error error;
++			Message reply;
++			if (sd_bus_call_method(bus, NM_SERVICE, SETTINGS_PATH, SETTINGS_IFACE, "ListConnections", error.get(), reply.out(), "") < 0)
++				return profiles;
++
++			sd_bus_message* m = reply.get();
++			if (sd_bus_message_enter_container(m, 'a', "o") < 0)
++				return profiles;
++
++			std::vector<std::string> paths;
++			const char* item = nullptr;
++			while (sd_bus_message_read(m, "o", &item) > 0)
++				paths.push_back(item != nullptr ? item : "");
++
++			for (const auto& path : paths)
++			{
++				Profile profile;
++				if (readProfile(bus, path, profile) && profile.type == "802-11-wireless" && !profile.ssid.empty())
++					profiles.push_back(profile);
++			}
++
++			return profiles;
++		}
++
++		bool deleteProfile(sd_bus* bus, const std::string& path, std::string* errorText)
++		{
++			return callSimple(bus, path, PROFILE_IFACE, "Delete", errorText);
++		}
++
++		// ---------------------------------------------------- connection settings
++
++		bool appendString(sd_bus_message* m, const char* key, const char* value)
++		{
++			return sd_bus_message_open_container(m, 'e', "sv") >= 0
++				&& sd_bus_message_append(m, "s", key) >= 0
++				&& sd_bus_message_open_container(m, 'v', "s") >= 0
++				&& sd_bus_message_append(m, "s", value) >= 0
++				&& sd_bus_message_close_container(m) >= 0
++				&& sd_bus_message_close_container(m) >= 0;
++		}
++
++		bool appendBool(sd_bus_message* m, const char* key, bool value)
++		{
++			return sd_bus_message_open_container(m, 'e', "sv") >= 0
++				&& sd_bus_message_append(m, "s", key) >= 0
++				&& sd_bus_message_open_container(m, 'v', "b") >= 0
++				&& sd_bus_message_append(m, "b", value ? 1 : 0) >= 0
++				&& sd_bus_message_close_container(m) >= 0
++				&& sd_bus_message_close_container(m) >= 0;
++		}
++
++		bool appendBytes(sd_bus_message* m, const char* key, const std::string& value)
++		{
++			return sd_bus_message_open_container(m, 'e', "sv") >= 0
++				&& sd_bus_message_append(m, "s", key) >= 0
++				&& sd_bus_message_open_container(m, 'v', "ay") >= 0
++				&& sd_bus_message_append_array(m, 'y', value.data(), value.size()) >= 0
++				&& sd_bus_message_close_container(m) >= 0
++				&& sd_bus_message_close_container(m) >= 0;
++		}
++
++		// Opens "e" "sa{sv}" and the dictionary inside it; closeSection() closes both.
++		bool openSection(sd_bus_message* m, const char* name)
++		{
++			return sd_bus_message_open_container(m, 'e', "sa{sv}") >= 0
++				&& sd_bus_message_append(m, "s", name) >= 0
++				&& sd_bus_message_open_container(m, 'a', "{sv}") >= 0;
++		}
++
++		bool closeSection(sd_bus_message* m)
++		{
++			return sd_bus_message_close_container(m) >= 0 && sd_bus_message_close_container(m) >= 0;
++		}
++
++		// The connection of AddAndActivateConnection: a{sa{sv}}
++		bool appendConnection(sd_bus_message* m, const std::string& ssid, Security security, const std::string& key)
++		{
++			if (sd_bus_message_open_container(m, 'a', "{sa{sv}}") < 0)
++				return false;
++
++			if (!openSection(m, "connection")
++				|| !appendString(m, "id", ssid.c_str())
++				|| !appendString(m, "type", "802-11-wireless")
++				|| !appendBool(m, "autoconnect", true)
++				|| !closeSection(m))
++				return false;
++
++			if (!openSection(m, "802-11-wireless")
++				|| !appendBytes(m, "ssid", ssid)
++				|| !appendString(m, "mode", "infrastructure")
++				|| !closeSection(m))
++				return false;
++
++			if (security != Security::Open)
++			{
++				if (!openSection(m, "802-11-wireless-security")
++					|| !appendString(m, "key-mgmt", security == Security::Sae ? "sae" : "wpa-psk")
++					|| !appendString(m, "psk", key.c_str())
++					|| !closeSection(m))
++					return false;
++			}
++
++			return sd_bus_message_close_container(m) >= 0;
++		}
++
++		// "authentication failed" reasons of NMDeviceStateReason
++		std::string describeFailure(sd_bus* bus, const std::string& devicePath)
++		{
++			Error error;
++			Message reply;
++			if (sd_bus_get_property(bus, NM_SERVICE, devicePath.c_str(), DEVICE_IFACE, "StateReason", error.get(), reply.out(), "(uu)") >= 0)
++			{
++				uint32_t state = 0;
++				uint32_t reason = 0;
++				if (sd_bus_message_read(reply.get(), "(uu)", &state, &reason) >= 0)
++				{
++					if (reason == 7 || reason == 9 || reason == 10 || reason == 11)
++						return "authentication failed (wrong password?)";
++
++					if (reason != 0)
++						return "connection failed (reason " + std::to_string(reason) + ")";
++				}
++			}
++
++			return "connection failed";
++		}
++
++		bool waitForActivation(sd_bus* bus, const std::string& activePath, const std::string& devicePath, std::string* errorText)
++		{
++			const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(45);
++
++			while (std::chrono::steady_clock::now() < deadline)
++			{
++				uint32_t state = 0;
++				if (!getU32(bus, activePath, ACTIVE_IFACE, "State", state))
++				{
++					// The active connection is gone: it was torn down because it failed.
++					setError(errorText, describeFailure(bus, devicePath));
++					return false;
++				}
++
++				if (state == ACTIVE_ACTIVATED)
++					return true;
++
++				if (state == 3 || state == 4) // deactivating, deactivated
++				{
++					setError(errorText, describeFailure(bus, devicePath));
++					return false;
++				}
++
++				std::this_thread::sleep_for(std::chrono::milliseconds(300));
++			}
++
++			setError(errorText, "timeout while connecting");
++			return false;
++		}
++
++		Ethernet::State mapState(uint32_t state)
++		{
++			if (state == STATE_UNAVAILABLE || state == STATE_UNMANAGED)
++				return Ethernet::Unavailable;
++			if (state == STATE_DISCONNECTED)
++				return Ethernet::Disconnected;
++			if (state == STATE_ACTIVATED)
++				return Ethernet::Connected;
++			if (state >= STATE_FAILED)
++				return Ethernet::Failed;
++
++			return Ethernet::Connecting;
++		}
++	}
++
++	// --------------------------------------------------------------- public API
++
++	bool isAvailable()
++	{
++		Bus bus(PROBE_TIMEOUT);
++		if (!bus)
++			return false;
++
++		std::string version;
++		return getString(bus.get(), NM_PATH, NM_IFACE, "Version", version);
++	}
++
++	WifiStatus wifiStatus()
++	{
++		WifiStatus status;
++
++		Bus bus(PROBE_TIMEOUT);
++		if (!bus)
++			return status;
++
++		Device device;
++		if (!findDevice(bus.get(), TYPE_WIFI, device))
++			return status;
++
++		status.present = true;
++		getBool(bus.get(), NM_PATH, NM_IFACE, "WirelessEnabled", status.enabled);
++
++		bool hardwareEnabled = true;
++		if (getBool(bus.get(), NM_PATH, NM_IFACE, "WirelessHardwareEnabled", hardwareEnabled))
++			status.hardwareBlocked = !hardwareEnabled;
++
++		if (status.enabled && device.state == STATE_ACTIVATED)
++		{
++			std::string apPath;
++			if (getString(bus.get(), device.path, WIRELESS_IFACE, "ActiveAccessPoint", apPath, "o") && hasObject(apPath))
++			{
++				RawAccessPoint ap;
++				if (readAccessPoint(bus.get(), apPath, ap))
++					status.connectedSsid = ap.ssid;
++			}
++
++			status.ip = readIp(bus.get(), device.path, true);
++		}
++
++		return status;
++	}
++
++	bool setWifiEnabled(bool enabled, std::string* error)
++	{
++		Bus bus;
++		if (!bus)
++		{
++			setError(error, "cannot connect to the system bus");
++			return false;
++		}
++
++		Error callError;
++		int r = sd_bus_set_property(bus.get(), NM_SERVICE, NM_PATH, NM_IFACE, "WirelessEnabled", callError.get(), "b", enabled ? 1 : 0);
++		if (r < 0)
++		{
++			setError(error, callError.text(r));
++			return false;
++		}
++
++		return true;
++	}
++
++	std::vector<AccessPoint> accessPoints(bool scan)
++	{
++		std::vector<AccessPoint> result;
++
++		Bus bus;
++		if (!bus)
++			return result;
++
++		Device device;
++		if (!findDevice(bus.get(), TYPE_WIFI, device))
++			return result;
++
++		if (scan)
++			requestScan(bus.get(), device.path);
++
++		std::string activeSsid;
++		std::string activePath;
++		if (getString(bus.get(), device.path, WIRELESS_IFACE, "ActiveAccessPoint", activePath, "o") && hasObject(activePath) && device.state == STATE_ACTIVATED)
++		{
++			RawAccessPoint active;
++			if (readAccessPoint(bus.get(), activePath, active))
++				activeSsid = active.ssid;
++		}
++
++		std::vector<std::string> saved;
++		for (const auto& profile : wifiProfiles(bus.get()))
++			saved.push_back(profile.ssid);
++
++		// Several access points can share a name (mesh, repeaters): keep the strongest.
++		std::map<std::string, AccessPoint> bySsid;
++		for (const auto& raw : readAccessPoints(bus.get(), device.path))
++		{
++			const Security security = classify(raw);
++
++			AccessPoint ap;
++			ap.ssid = raw.ssid;
++			ap.strength = raw.strength;
++			ap.secured = security != Security::Open;
++			ap.supported = security != Security::Unsupported;
++			ap.connected = raw.ssid == activeSsid;
++			ap.saved = std::find(saved.begin(), saved.end(), raw.ssid) != saved.end();
++
++			auto found = bySsid.find(raw.ssid);
++			if (found == bySsid.end() || found->second.strength < ap.strength)
++				bySsid[raw.ssid] = ap;
++		}
++
++		for (const auto& entry : bySsid)
++			result.push_back(entry.second);
++
++		std::sort(result.begin(), result.end(), [](const AccessPoint& a, const AccessPoint& b)
++		{
++			if (a.connected != b.connected)
++				return a.connected;
++
++			return a.strength > b.strength;
++		});
++
++		return result;
++	}
++
++	bool connectWifi(const std::string& ssid, const std::string& key, std::string* error)
++	{
++		Bus bus;
++		if (!bus)
++		{
++			setError(error, "cannot connect to the system bus");
++			return false;
++		}
++
++		Device device;
++		if (!findDevice(bus.get(), TYPE_WIFI, device))
++		{
++			setError(error, "no wireless adapter");
++			return false;
++		}
++
++		const RawAccessPoint* chosen = nullptr;
++		std::vector<RawAccessPoint> aps = readAccessPoints(bus.get(), device.path);
++		for (const auto& ap : aps)
++			if (ap.ssid == ssid && (chosen == nullptr || chosen->strength < ap.strength))
++				chosen = &ap;
++
++		if (chosen == nullptr)
++		{
++			setError(error, "network " + ssid + " is not in range");
++			return false;
++		}
++
++		const Security security = classify(*chosen);
++		if (security == Security::Unsupported)
++		{
++			setError(error, "unsupported security (WEP or WPA-Enterprise)");
++			return false;
++		}
++
++		std::vector<Profile> existing;
++		for (const auto& profile : wifiProfiles(bus.get()))
++			if (profile.ssid == ssid)
++				existing.push_back(profile);
++
++		// A new password replaces whatever was saved for this network.
++		if (!key.empty() && !existing.empty())
++		{
++			for (const auto& profile : existing)
++				deleteProfile(bus.get(), profile.path, nullptr);
++
++			existing.clear();
++		}
++
++		std::string activePath;
++		std::string createdProfile;
++
++		if (!existing.empty())
++		{
++			Error callError;
++			Message reply;
++			int r = sd_bus_call_method(bus.get(), NM_SERVICE, NM_PATH, NM_IFACE, "ActivateConnection", callError.get(), reply.out(),
++				"ooo", existing.front().path.c_str(), device.path.c_str(), chosen->path.c_str());
++			if (r < 0)
++			{
++				setError(error, callError.text(r));
++				return false;
++			}
++
++			const char* active = nullptr;
++			if (sd_bus_message_read(reply.get(), "o", &active) < 0 || active == nullptr)
++			{
++				setError(error, "bad reply from NetworkManager");
++				return false;
++			}
++			activePath = active;
++		}
++		else
++		{
++			if (security != Security::Open && key.empty())
++			{
++				setError(error, "a password is needed");
++				return false;
++			}
++
++			Message call;
++			int r = sd_bus_message_new_method_call(bus.get(), call.out(), NM_SERVICE, NM_PATH, NM_IFACE, "AddAndActivateConnection");
++			if (r >= 0 && !appendConnection(call.get(), ssid, security, key))
++				r = -1;
++			if (r >= 0)
++				r = sd_bus_message_append(call.get(), "oo", device.path.c_str(), chosen->path.c_str());
++			if (r < 0)
++			{
++				setError(error, "cannot build the connection");
++				return false;
++			}
++
++			Error callError;
++			Message reply;
++			r = sd_bus_call(bus.get(), call.get(), 0, callError.get(), reply.out());
++			if (r < 0)
++			{
++				setError(error, callError.text(r));
++				return false;
++			}
++
++			const char* profile = nullptr;
++			const char* active = nullptr;
++			if (sd_bus_message_read(reply.get(), "oo", &profile, &active) < 0 || profile == nullptr || active == nullptr)
++			{
++				setError(error, "bad reply from NetworkManager");
++				return false;
++			}
++
++			createdProfile = profile;
++			activePath = active;
++		}
++
++		if (waitForActivation(bus.get(), activePath, device.path, error))
++			return true;
++
++		// Do not keep a profile whose password does not work.
++		if (!createdProfile.empty())
++			deleteProfile(bus.get(), createdProfile, nullptr);
++
++		return false;
++	}
++
++	bool disconnectWifi(std::string* error)
++	{
++		Bus bus;
++		if (!bus)
++		{
++			setError(error, "cannot connect to the system bus");
++			return false;
++		}
++
++		Device device;
++		if (!findDevice(bus.get(), TYPE_WIFI, device))
++		{
++			setError(error, "no wireless adapter");
++			return false;
++		}
++
++		return callSimple(bus.get(), device.path, DEVICE_IFACE, "Disconnect", error);
++	}
++
++	bool forgetWifi(const std::string& ssid, std::string* error)
++	{
++		Bus bus;
++		if (!bus)
++		{
++			setError(error, "cannot connect to the system bus");
++			return false;
++		}
++
++		bool ok = true;
++		for (const auto& profile : wifiProfiles(bus.get()))
++			if (profile.ssid == ssid)
++				ok = deleteProfile(bus.get(), profile.path, error) && ok;
++
++		return ok;
++	}
++
++	std::vector<Ethernet> ethernetDevices()
++	{
++		std::vector<Ethernet> result;
++
++		Bus bus(PROBE_TIMEOUT);
++		if (!bus)
++			return result;
++
++		for (const auto& device : readDevices(bus.get()))
++		{
++			if (device.type != TYPE_ETHERNET || !device.managed || device.state == STATE_UNMANAGED)
++				continue;
++
++			Ethernet ethernet;
++			ethernet.path = device.path;
++			ethernet.iface = device.iface;
++			ethernet.state = mapState(device.state);
++
++			if (ethernet.state == Ethernet::Connected)
++				ethernet.ip = readIp(bus.get(), device.path, true);
++
++			result.push_back(ethernet);
++		}
++
++		return result;
++	}
++
++	bool connectEthernet(const std::string& devicePath, std::string* error)
++	{
++		Bus bus;
++		if (!bus)
++		{
++			setError(error, "cannot connect to the system bus");
++			return false;
++		}
++
++		// "/" as the connection lets NetworkManager pick (or create) the profile that fits the device.
++		Error callError;
++		int r = sd_bus_call_method(bus.get(), NM_SERVICE, NM_PATH, NM_IFACE, "ActivateConnection", callError.get(), nullptr,
++			"ooo", "/", devicePath.c_str(), "/");
++		if (r < 0)
++		{
++			setError(error, callError.text(r));
++			return false;
++		}
++
++		// Activation goes on in the background: wait until the device settles.
++		bool progressed = false;
++		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
++		while (std::chrono::steady_clock::now() < deadline)
++		{
++			uint32_t state = 0;
++			if (getU32(bus.get(), devicePath, DEVICE_IFACE, "State", state))
++			{
++				if (state == STATE_ACTIVATED)
++					return true;
++
++				if (state > STATE_DISCONNECTED && state < STATE_ACTIVATED)
++					progressed = true;
++
++				if (state >= STATE_FAILED || (progressed && state <= STATE_DISCONNECTED))
++				{
++					setError(error, "connection failed");
++					return false;
++				}
++			}
++
++			std::this_thread::sleep_for(std::chrono::milliseconds(300));
++		}
++
++		setError(error, "timeout while connecting");
++		return false;
++	}
++
++	bool disconnectEthernet(const std::string& devicePath, std::string* error)
++	{
++		Bus bus;
++		if (!bus)
++		{
++			setError(error, "cannot connect to the system bus");
++			return false;
++		}
++
++		return callSimple(bus.get(), devicePath, DEVICE_IFACE, "Disconnect", error);
++	}
++}
++
++#endif
+diff --git a/es-app/src/NetworkManagerClient.h b/es-app/src/NetworkManagerClient.h
+new file mode 100644
+index 0000000..689c825
+--- /dev/null
++++ b/es-app/src/NetworkManagerClient.h
+@@ -0,0 +1,67 @@
++#pragma once
++
++// Thin client of NetworkManager over the D-Bus system bus, written on top of sd-bus
++// (libsystemd). Like BluezBluetooth it has no dependency on the rest of
++// EmulationStation. Every function opens its own connection, so any of them can be
++// called from any thread; the ones that wait (scan, connect) are meant for a worker thread.
++
++#if defined(HAVE_NETWORKMANAGER)
++
++#include <string>
++#include <vector>
++
++namespace NetworkManager
++{
++	struct AccessPoint
++	{
++		std::string ssid;
++		int strength = 0;          // 0-100
++		bool secured = false;
++		bool supported = true;     // false for WEP and WPA-Enterprise, which cannot be set up from here
++		bool connected = false;
++		bool saved = false;        // NetworkManager already has a profile for this SSID
++	};
++
++	struct WifiStatus
++	{
++		bool present = false;          // there is a wireless device
++		bool enabled = false;          // the radio is on
++		bool hardwareBlocked = false;  // a hardware switch has it off
++		std::string connectedSsid;     // empty when not connected
++		std::string ip;
++	};
++
++	struct Ethernet
++	{
++		enum State { Unavailable, Disconnected, Connecting, Connected, Failed };
++
++		std::string path;
++		std::string iface;
++		State state = Unavailable;     // Unavailable is what NetworkManager reports without a cable
++		std::string ip;
++	};
++
++	// NetworkManager answers on the system bus.
++	bool isAvailable();
++
++	WifiStatus wifiStatus();
++	bool setWifiEnabled(bool enabled, std::string* error = nullptr);
++
++	// Networks in range, strongest first, the connected one on top. With `scan` it asks the
++	// adapter for a fresh scan and waits for it (a few seconds at most).
++	std::vector<AccessPoint> accessPoints(bool scan);
++
++	// Joins a network and waits for the result. `key` is the WPA/WPA3 passphrase; leave it
++	// empty for open networks and for networks that already have a profile. A new key
++	// replaces the profile that was saved. A profile created by a failed attempt is removed,
++	// so a wrong password is not kept.
++	bool connectWifi(const std::string& ssid, const std::string& key, std::string* error = nullptr);
++	bool disconnectWifi(std::string* error = nullptr);
++	bool forgetWifi(const std::string& ssid, std::string* error = nullptr);
++
++	std::vector<Ethernet> ethernetDevices();
++	bool connectEthernet(const std::string& devicePath, std::string* error = nullptr);
++	bool disconnectEthernet(const std::string& devicePath, std::string* error = nullptr);
++}
++
++#endif
+diff --git a/es-app/src/guis/GuiMenu.cpp b/es-app/src/guis/GuiMenu.cpp
+index 0da003e..3df44f8 100644
+--- a/es-app/src/guis/GuiMenu.cpp
++++ b/es-app/src/guis/GuiMenu.cpp
+@@ -49,6 +49,10 @@
+ #include "guis/GuiTextEditPopup.h"
+ #include "guis/GuiWifi.h"
+ #include "guis/GuiBluetoothPair.h"
++#if defined(HAVE_NETWORKMANAGER)
++#include "guis/GuiNetworkSettings.h"
++#include "NetworkManagerClient.h"
++#endif
+ #include "guis/GuiBluetoothDevices.h"
+ #include "scrapers/ThreadedScraper.h"
+ #include "FileSorts.h"
+@@ -190,6 +194,12 @@ GuiMenu::GuiMenu(Window *window, bool animate) : GuiComponent(window), mMenu(win
+ 			addEntry(_("CONFIGURE INPUT"), true, [this] { openConfigInput(); }, "iconControllers");
+ 
+ 		addEntry(_("SOUND SETTINGS").c_str(), true, [this] { openSoundSettings(); }, "iconSound");
++
++#if defined(HAVE_NETWORKMANAGER)
++		if (NetworkManager::isAvailable())
++			addEntry(_("NETWORK SETTINGS").c_str(), true, [window] { window->pushGui(new GuiNetworkSettings(window)); }, "iconNetwork");
++#endif
++
+ 		addEntry(_("GAME COLLECTION SETTINGS").c_str(), true, [this] { openCollectionSystemSettings(); }, "iconAdvanced");
+ 
+ 		if (!ApiSystem::getInstance()->isScriptingSupported(ApiSystem::GAMESETTINGS))
+diff --git a/es-app/src/guis/GuiNetworkSettings.cpp b/es-app/src/guis/GuiNetworkSettings.cpp
+new file mode 100644
+index 0000000..5de74e8
+--- /dev/null
++++ b/es-app/src/guis/GuiNetworkSettings.cpp
+@@ -0,0 +1,157 @@
++#if defined(HAVE_NETWORKMANAGER)
++
++#include "guis/GuiNetworkSettings.h"
++
++#include "GuiLoading.h"
++#include "LocaleES.h"
++#include "Log.h"
++#include "NetworkManagerClient.h"
++#include "ThemeData.h"
++#include "Window.h"
++#include "components/SwitchComponent.h"
++#include "components/TextComponent.h"
++#include "guis/GuiMsgBox.h"
++#include "guis/GuiNetworkWifi.h"
++#include "utils/StringUtil.h"
++
++namespace
++{
++	std::shared_ptr<TextComponent> valueText(Window* window, const std::string& text)
++	{
++		auto theme = ThemeData::getMenuTheme();
++		return std::make_shared<TextComponent>(window, text, theme->Text.font, theme->Text.color, ALIGN_RIGHT);
++	}
++
++	std::string ethernetStatus(const NetworkManager::Ethernet& ethernet)
++	{
++		switch (ethernet.state)
++		{
++		case NetworkManager::Ethernet::Connected:
++			return ethernet.ip.empty() ? _("CONNECTED") : _("CONNECTED") + " - " + ethernet.ip;
++		case NetworkManager::Ethernet::Connecting:
++			return _("CONNECTING...");
++		case NetworkManager::Ethernet::Disconnected:
++			return _("DISCONNECTED");
++		case NetworkManager::Ethernet::Failed:
++			return _("CONNECTION FAILED");
++		default:
++			return _("NO CABLE");
++		}
++	}
++}
++
++GuiNetworkSettings::GuiNetworkSettings(Window* window, int autoSel) : GuiSettings(window, _("NETWORK SETTINGS").c_str())
++{
++	// Wi-Fi
++	addGroup(_("WI-FI"));
++
++	const NetworkManager::WifiStatus wifi = NetworkManager::wifiStatus();
++
++	if (!wifi.present)
++		addEntry(_("NO WI-FI ADAPTER FOUND"), false);
++	else if (wifi.hardwareBlocked)
++		addEntry(_("WI-FI IS TURNED OFF BY A HARDWARE SWITCH"), false);
++	else
++	{
++		auto enableWifi = std::make_shared<SwitchComponent>(mWindow);
++		enableWifi->setState(wifi.enabled);
++		addWithLabel(_("ENABLE WI-FI"), enableWifi, autoSel == 1);
++		enableWifi->setOnChangedCallback([this, enableWifi, wasEnabled = wifi.enabled]
++		{
++			bool enabled = enableWifi->getState();
++			if (enabled != wasEnabled)
++			{
++				std::string error;
++				if (!NetworkManager::setWifiEnabled(enabled, &error))
++				{
++					LOG(LogError) << "Wi-Fi: cannot change the radio: " << error;
++				}
++
++				reopen(1);
++			}
++		});
++
++		if (wifi.enabled)
++		{
++			addWithLabel(_("CONNECTED NETWORK"), valueText(mWindow, wifi.connectedSsid.empty() ? _("NONE") : wifi.connectedSsid));
++
++			if (!wifi.ip.empty())
++				addWithLabel(_("IP ADDRESS"), valueText(mWindow, wifi.ip));
++
++			addEntry(_("AVAILABLE NETWORKS"), true, [this, window]
++			{
++				window->pushGui(new GuiNetworkWifi(window, [this] { reopen(2); }));
++			}, "", false, autoSel == 2);
++		}
++	}
++
++	// Ethernet
++	addGroup(_("ETHERNET"));
++
++	const std::vector<NetworkManager::Ethernet> adapters = NetworkManager::ethernetDevices();
++	if (adapters.empty())
++		addEntry(_("NO ETHERNET ADAPTER FOUND"), false);
++
++	int index = 0;
++	for (const auto& ethernet : adapters)
++	{
++		const int sel = 3 + index++;
++
++		mMenu.addWithDescription(ethernet.iface, ethernetStatus(ethernet), nullptr, [this, window, ethernet, sel]
++		{
++			switch (ethernet.state)
++			{
++			case NetworkManager::Ethernet::Unavailable:
++				window->pushGui(new GuiMsgBox(window, Utils::String::format(_("NO CABLE DETECTED ON '%s'.").c_str(), ethernet.iface.c_str())));
++				break;
++
++			case NetworkManager::Ethernet::Connecting:
++				break;
++
++			case NetworkManager::Ethernet::Connected:
++				window->pushGui(new GuiMsgBox(window, Utils::String::format(_("ARE YOU SURE YOU WANT TO DISCONNECT '%s' ?").c_str(), ethernet.iface.c_str()),
++					_("YES"), [this, ethernet, sel] { runEthernet(ethernet.path, false, sel); },
++					_("NO"), nullptr));
++				break;
++
++			default:
++				runEthernet(ethernet.path, true, sel);
++				break;
++			}
++		}, "", autoSel == sel);
++	}
++}
++
++void GuiNetworkSettings::reopen(int autoSel)
++{
++	Window* parent = mWindow;
++	delete this;
++	parent->pushGui(new GuiNetworkSettings(parent, autoSel));
++}
++
++void GuiNetworkSettings::runEthernet(const std::string& devicePath, bool connect, int autoSel)
++{
++	Window* window = mWindow;
++
++	window->pushGui(new GuiLoading<std::pair<bool, std::string>>(window, _("PLEASE WAIT"),
++		[devicePath, connect](auto gui)
++		{
++			std::string error;
++			bool ok = connect ? NetworkManager::connectEthernet(devicePath, &error) : NetworkManager::disconnectEthernet(devicePath, &error);
++			if (!ok)
++			{
++				LOG(LogError) << "Ethernet: " << (connect ? "connect" : "disconnect") << " failed: " << error;
++			}
++
++			return std::make_pair(ok, error);
++		},
++		[this, window, autoSel](std::pair<bool, std::string> result)
++		{
++			if (!result.first)
++				window->pushGui(new GuiMsgBox(window, result.second.empty() ? _("THE OPERATION FAILED.") : _("THE OPERATION FAILED.") + "\n" + result.second));
++
++			reopen(autoSel);
++		}));
++}
++
++#endif
+diff --git a/es-app/src/guis/GuiNetworkSettings.h b/es-app/src/guis/GuiNetworkSettings.h
+new file mode 100644
+index 0000000..24b458a
+--- /dev/null
++++ b/es-app/src/guis/GuiNetworkSettings.h
+@@ -0,0 +1,20 @@
++#pragma once
++
++#if defined(HAVE_NETWORKMANAGER)
++
++#include "guis/GuiSettings.h"
++
++// NETWORK SETTINGS on a desktop Linux: Wi-Fi (radio, current network, list of networks)
++// and Ethernet (status, connect/disconnect), all through NetworkManager.
++class GuiNetworkSettings : public GuiSettings
++{
++public:
++	// autoSel: row to leave the cursor on when the screen is rebuilt (0 = first)
++	GuiNetworkSettings(Window* window, int autoSel = 0);
++
++private:
++	void reopen(int autoSel);
++	void runEthernet(const std::string& devicePath, bool connect, int autoSel);
++};
++
++#endif
+diff --git a/es-app/src/guis/GuiNetworkWifi.cpp b/es-app/src/guis/GuiNetworkWifi.cpp
+new file mode 100644
+index 0000000..dba1de4
+--- /dev/null
++++ b/es-app/src/guis/GuiNetworkWifi.cpp
+@@ -0,0 +1,248 @@
++#if defined(HAVE_NETWORKMANAGER)
++
++#include "guis/GuiNetworkWifi.h"
++
++#include "GuiLoading.h"
++#include "LocaleES.h"
++#include "Log.h"
++#include "Settings.h"
++#include "Window.h"
++#include "guis/GuiMsgBox.h"
++#include "guis/GuiTextEditPopup.h"
++#include "guis/GuiTextEditPopupKeyboard.h"
++#include "utils/StringUtil.h"
++
++#include <utility>
++
++namespace
++{
++	typedef std::pair<bool, std::string> Result;   // success, error text
++}
++
++GuiNetworkWifi::GuiNetworkWifi(Window* window, const std::function<void()>& onChanged)
++	: GuiComponent(window), mMenu(window, _("WI-FI NETWORKS").c_str()), mOnChanged(onChanged), mWaitingLoad(false)
++{
++	addChild(&mMenu);
++
++	mMenu.addButton(_("REFRESH"), "refresh", [this] { onRefresh(); });
++	mMenu.addButton(_("BACK"), "back", [this] { delete this; });
++
++	load(NetworkManager::accessPoints(false));
++
++	// A fresh scan right away: what NetworkManager has cached may be old.
++	mWindow->postToUiThread([this]() { onRefresh(); });
++
++	if (Renderer::ScreenSettings::fullScreenMenus())
++		mMenu.setPosition((Renderer::getScreenWidth() - mMenu.getSize().x()) / 2, (Renderer::getScreenHeight() - mMenu.getSize().y()) / 2);
++	else
++		mMenu.setPosition((Renderer::getScreenWidth() - mMenu.getSize().x()) / 2, Renderer::getScreenHeight() * 0.15f);
++}
++
++void GuiNetworkWifi::load(const std::vector<NetworkManager::AccessPoint>& networks)
++{
++	const bool stayOnButtons = mMenu.isCursorToButtons();
++
++	mMenu.clear();
++
++	if (networks.empty())
++		mMenu.addEntry(_("NO WI-FI NETWORKS FOUND"), false, [this] { onRefresh(); });
++	else
++	{
++		for (const auto& network : networks)
++		{
++			std::string name = network.ssid;
++			if (network.connected)
++				name += " (" + _("CONNECTED") + ")";
++
++			std::string description = _("SIGNAL") + " " + std::to_string(network.strength) + "%";
++			if (network.secured)
++				description += " - " + _("SECURED");
++			if (network.saved)
++				description += " - " + _("SAVED");
++			if (!network.supported)
++				description += " - " + _("NOT SUPPORTED");
++
++			mMenu.addWithDescription(name, description, nullptr, [this, network] { onSelect(network); });
++		}
++	}
++
++	mMenu.updateSize();
++
++	if (stayOnButtons)
++		mMenu.setCursorToButtons();
++	else
++		mMenu.setCursorToList();
++
++	if (Renderer::ScreenSettings::fullScreenMenus())
++		mMenu.setPosition((Renderer::getScreenWidth() - mMenu.getSize().x()) / 2, (Renderer::getScreenHeight() - mMenu.getSize().y()) / 2);
++
++	mWaitingLoad = false;
++}
++
++void GuiNetworkWifi::onRefresh()
++{
++	if (mWaitingLoad)
++		return;
++
++	mWaitingLoad = true;
++
++	mWindow->pushGui(new GuiLoading<std::vector<NetworkManager::AccessPoint>>(mWindow, _("SEARCHING WI-FI NETWORKS"),
++		[](auto gui)
++		{
++			return NetworkManager::accessPoints(true);
++		},
++		[this](std::vector<NetworkManager::AccessPoint> networks)
++		{
++			load(networks);
++		}));
++}
++
++void GuiNetworkWifi::onSelect(const NetworkManager::AccessPoint& network)
++{
++	if (mWaitingLoad)
++		return;
++
++	Window* window = mWindow;
++	const std::string ssid = network.ssid;
++
++	if (network.connected || network.saved)
++	{
++		// Joined or known already: no password to ask.
++		window->pushGui(new GuiMsgBox(window, ssid,
++			network.connected ? _("DISCONNECT") : _("CONNECT"),
++			[this, ssid, connected = network.connected] { if (connected) disconnect(); else connect(ssid, ""); },
++			_("FORGET"), [this, ssid] { forget(ssid); },
++			_("BACK"), nullptr));
++	}
++	else if (!network.supported)
++	{
++		window->pushGui(new GuiMsgBox(window, _("THIS NETWORK USES WEP OR WPA-ENTERPRISE, WHICH CANNOT BE SET UP HERE.")));
++	}
++	else if (network.secured)
++		askPassword(ssid);
++	else
++		connect(ssid, "");
++}
++
++void GuiNetworkWifi::askPassword(const std::string& ssid)
++{
++	const std::string title = _("WI-FI KEY");
++	auto onKey = [this, ssid](const std::string& key)
++	{
++		if (!key.empty())
++			connect(ssid, key);
++	};
++
++	if (Settings::getInstance()->getBool("UseOSK"))
++		mWindow->pushGui(new GuiTextEditPopupKeyboard(mWindow, title, "", onKey, false));
++	else
++		mWindow->pushGui(new GuiTextEditPopup(mWindow, title, "", onKey, false));
++}
++
++void GuiNetworkWifi::connect(const std::string& ssid, const std::string& key)
++{
++	if (mWaitingLoad)
++		return;
++
++	mWaitingLoad = true;
++
++	mWindow->pushGui(new GuiLoading<Result>(mWindow, Utils::String::format(_("CONNECTING TO %s").c_str(), ssid.c_str()),
++		[ssid, key](auto gui)
++		{
++			std::string error;
++			bool ok = NetworkManager::connectWifi(ssid, key, &error);
++			if (!ok)
++			{
++				LOG(LogError) << "Wi-Fi: connecting to " << ssid << " failed: " << error;
++			}
++
++			return Result(ok, error);
++		},
++		[this, ssid](Result result)
++		{
++			finished(result.first, Utils::String::format(_("COULD NOT CONNECT TO '%s'.").c_str(), ssid.c_str()), result.second);
++		}));
++}
++
++void GuiNetworkWifi::disconnect()
++{
++	if (mWaitingLoad)
++		return;
++
++	mWaitingLoad = true;
++
++	mWindow->pushGui(new GuiLoading<Result>(mWindow, _("PLEASE WAIT"),
++		[](auto gui)
++		{
++			std::string error;
++			bool ok = NetworkManager::disconnectWifi(&error);
++			return Result(ok, error);
++		},
++		[this](Result result)
++		{
++			finished(result.first, _("COULD NOT DISCONNECT."), result.second);
++		}));
++}
++
++void GuiNetworkWifi::forget(const std::string& ssid)
++{
++	if (mWaitingLoad)
++		return;
++
++	mWaitingLoad = true;
++
++	mWindow->pushGui(new GuiLoading<Result>(mWindow, _("PLEASE WAIT"),
++		[ssid](auto gui)
++		{
++			std::string error;
++			bool ok = NetworkManager::forgetWifi(ssid, &error);
++			return Result(ok, error);
++		},
++		[this, ssid](Result result)
++		{
++			finished(result.first, Utils::String::format(_("COULD NOT FORGET '%s'.").c_str(), ssid.c_str()), result.second);
++		}));
++}
++
++// After an operation: tell the owner and close on success; show the reason and stay on failure.
++void GuiNetworkWifi::finished(bool ok, const std::string& failureText, const std::string& error)
++{
++	mWaitingLoad = false;
++
++	if (ok)
++	{
++		if (mOnChanged)
++			mOnChanged();
++
++		delete this;
++		return;
++	}
++
++	mWindow->pushGui(new GuiMsgBox(mWindow, error.empty() ? failureText : failureText + "\n" + error));
++	load(NetworkManager::accessPoints(false));
++}
++
++bool GuiNetworkWifi::input(InputConfig* config, Input input)
++{
++	if (GuiComponent::input(config, input))
++		return true;
++
++	if (input.value != 0 && config->isMappedTo(BUTTON_BACK, input))
++	{
++		if (!mWaitingLoad)
++			delete this;
++
++		return true;
++	}
++
++	return false;
++}
++
++std::vector<HelpPrompt> GuiNetworkWifi::getHelpPrompts()
++{
++	std::vector<HelpPrompt> prompts = mMenu.getHelpPrompts();
++	prompts.push_back(HelpPrompt(BUTTON_BACK, _("BACK")));
++	return prompts;
++}
++
++#endif
+diff --git a/es-app/src/guis/GuiNetworkWifi.h b/es-app/src/guis/GuiNetworkWifi.h
+new file mode 100644
+index 0000000..68c4cc8
+--- /dev/null
++++ b/es-app/src/guis/GuiNetworkWifi.h
+@@ -0,0 +1,39 @@
++#pragma once
++
++#if defined(HAVE_NETWORKMANAGER)
++
++#include "GuiComponent.h"
++#include "NetworkManagerClient.h"
++#include "components/MenuComponent.h"
++
++#include <functional>
++#include <string>
++#include <vector>
++
++// List of the Wi-Fi networks in range: join one (asking for the password when it needs
++// one), disconnect from it or forget it. Talks to NetworkManager directly.
++class GuiNetworkWifi : public GuiComponent
++{
++public:
++	// onChanged is called after something changed (joined, disconnected, forgotten).
++	GuiNetworkWifi(Window* window, const std::function<void()>& onChanged);
++
++	bool input(InputConfig* config, Input input) override;
++	std::vector<HelpPrompt> getHelpPrompts() override;
++
++private:
++	void load(const std::vector<NetworkManager::AccessPoint>& networks);
++	void onRefresh();
++	void onSelect(const NetworkManager::AccessPoint& network);
++	void askPassword(const std::string& ssid);
++	void connect(const std::string& ssid, const std::string& key);
++	void disconnect();
++	void forget(const std::string& ssid);
++	void finished(bool ok, const std::string& failureText, const std::string& error);
++
++	MenuComponent mMenu;
++	std::function<void()> mOnChanged;
++	bool mWaitingLoad;
++};
++
++#endif
