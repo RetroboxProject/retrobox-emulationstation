@@ -1,0 +1,36 @@
+diff --git a/es-app/src/SaveState.cpp b/es-app/src/SaveState.cpp
+index aef374d..bd18f92 100644
+--- a/es-app/src/SaveState.cpp
++++ b/es-app/src/SaveState.cpp
+@@ -72,7 +72,8 @@ std::string SaveState::setupSaveState(FileData* game, const std::string& command
+ 	std::string cmd = command;
+ 
+ 	// Savestate has core information ? Setup correct emulator/core
+-	if (slot >= -1 && this->config != nullptr && !config->isActiveConfig(game) && !racommands)
++	// Retrobox: the default configuration names no emulator (keep the game's)
++	if (slot >= -1 && this->config != nullptr && !config->emulator.empty() && !config->isActiveConfig(game) && !racommands)
+ 	{
+ 		cmd = _changeCommandlineArgument(cmd, "-emulator", config->emulator);
+ 		cmd = _changeCommandlineArgument(cmd, "-core", config->core);
+diff --git a/es-app/src/SaveStateConfigFile.cpp b/es-app/src/SaveStateConfigFile.cpp
+index b60f0d3..a88a699 100644
+--- a/es-app/src/SaveStateConfigFile.cpp
++++ b/es-app/src/SaveStateConfigFile.cpp
+@@ -36,11 +36,15 @@ std::shared_ptr<SaveStateConfig> SaveStateConfig::Default()
+ 		_default->firstslot = 0;
+ 		_default->romGroup = 1; // should be computed (but always 1)
+ 		_default->slotGroup = 2; // should be computed (but always 2)
+-		_default->incremental = true;
++		// Retrobox: the slots are fixed, the overlay's (0 to 9) and its "Save and
++		// quit" (the auto one): a game starts from the state chosen, given as a
++		// file, with no new slot and no renumbering, and the auto state is
++		// never copied over or restored
++		_default->incremental = false;
+ 		_default->autosave = true;
+ 		_default->autosave_file = "{{romfilename}}.state.auto";			
+ 		_default->autosave_image = "{{romfilename}}.state.auto.png";
+-		_default->racommands = true;
++		_default->racommands = false;
+ 
+ 		_default->SetupRegEx();
+ 	}
