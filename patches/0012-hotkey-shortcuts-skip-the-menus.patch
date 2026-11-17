@@ -1,0 +1,73 @@
+diff --git a/es-app/src/main.cpp b/es-app/src/main.cpp
+index 29bf7f1..06b1849 100644
+--- a/es-app/src/main.cpp
++++ b/es-app/src/main.cpp
+@@ -485,6 +485,57 @@ void launchStartupGame()
+ 	}	
+ }
+ 
++// Retrobox: while a controller's hotkey is held, its other buttons and its
++// d-pad belong to the hotkey's shortcuts (retrobox-inputd opens the overlay on
++// Hotkey+B), not to the menus: their presses are dropped, as RetroArch does
++// while its hotkey is held, so Hotkey+B does not launch the selected game.
++// Releases always go through, so nothing stays held here. A hotkey held for
++// longer than HOTKEY_SHORTCUT_MS no longer counts: its release may never come
++// (the overlay grabs the controllers while it is open).
++static const Uint32 HOTKEY_SHORTCUT_MS = 2000;
++
++static bool isHotkeyShortcut(const SDL_Event& event)
++{
++	static std::map<SDL_JoystickID, Uint32> hotkeyDown;
++
++	SDL_JoystickID which;
++	Input input;
++	switch (event.type)
++	{
++	case SDL_JOYBUTTONDOWN:
++	case SDL_JOYBUTTONUP:
++		which = event.jbutton.which;
++		input = Input(which, TYPE_BUTTON, event.jbutton.button, event.jbutton.state == SDL_PRESSED, false);
++		break;
++	case SDL_JOYHATMOTION:
++		which = event.jhat.which;
++		input = Input(which, TYPE_HAT, event.jhat.hat, event.jhat.value, false);
++		break;
++	case SDL_JOYDEVICEREMOVED:
++		hotkeyDown.erase(event.jdevice.which);
++		return false;
++	default:
++		return false;
++	}
++
++	InputConfig* config = InputManager::getInstance()->getInputConfigByDevice(which);
++	if (config == nullptr)
++		return false;
++
++	if (config->isMappedTo("hotkey", input))
++	{
++		if (input.value != 0)
++			hotkeyDown[which] = SDL_GetTicks();
++		else
++			hotkeyDown.erase(which);
++
++		return false;
++	}
++
++	auto down = hotkeyDown.find(which);
++	return input.value != 0 && down != hotkeyDown.cend() && SDL_GetTicks() - down->second < HOTKEY_SHORTCUT_MS;
++}
++
+ // #include "utils/MathExpr.h"
+ 
+ int main(int argc, char* argv[])
+@@ -791,6 +842,10 @@ int main(int argc, char* argv[])
+ 			  if(eventTaken)
+ 			    continue;
+ #endif
++				// Retrobox: the hotkey's shortcuts are not the menus'
++				if (isHotkeyShortcut(event))
++					continue;
++
+ 
+ 				TRYCATCH("InputManager::parseEvent", InputManager::getInstance()->parseEvent(event, &window));
+ 
