@@ -84,6 +84,7 @@ its own is plain EmulationStation and keeps its data in `~/.emulationstation`.
 | `0011` | Language follows the system by default: an unset language is no longer forced to `en_US`; the LANGUAGE (REGION) menu gets an AUTO entry (showing the detected language), and an explicit choice is applied at startup. The KEYBOARD LAYOUT / VARIANT entries are removed from SYSTEM SETTINGS (the system handles them); build with `-DRETROBOX_KEYBOARD_MENU` to restore them |
 | `0012` | While a controller's hotkey is held (for up to two seconds), its other button and d-pad presses are dropped, as RetroArch does while its hotkey is held: they belong to the hotkey's shortcuts, so Hotkey+B opens `retrobox-overlay` without launching the selected game. Releases always go through |
 | `0013` | Save states in fixed slots, as `retrobox-overlay` keeps them (0 to 9, and the auto one for its "Save and quit"): a game starts from the chosen state given as a file, with no new slot, no renumbering, and no copying over or restoring of the auto state |
+| `0014` | *Missing BIOS check* through `$RETROBOX_ROOTDIR/bin/retrobox-bios` (same output as batocera's `batocera-systems`, `--filter SYSTEM` for one system); the entry shows when that script exists. EmulationStation's own question before each game (*Check BIOS files before running a game*) is removed, entry included: Retrobox's launcher checks the BIOS for the emulator the game runs with and says what is missing |
 
 They are split by topic so that when upstream drifts, the one that fails
 tells you where to look.

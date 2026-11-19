@@ -1,0 +1,67 @@
+diff --git a/es-app/src/ApiSystem.cpp b/es-app/src/ApiSystem.cpp
+index 330e302..433d051 100644
+--- a/es-app/src/ApiSystem.cpp
++++ b/es-app/src/ApiSystem.cpp
+@@ -819,9 +819,10 @@ std::vector<BiosSystem> ApiSystem::getBiosInformations(const std::string system)
+ 	BiosSystem current;
+ 	bool isCurrent = false;
+ 
+-	std::string cmd = "batocera-systems";
++	// retrobox-bios prints what batocera-systems does, from the systems' own declarations
++	std::string cmd = "\"" + retroboxScript("retrobox-bios") + "\"";
+ 	if (!system.empty())
+-		cmd += " --filter " + system;
++		cmd += " --filter \"" + system + "\"";
+ 
+ 	auto systems = executeEnumerationScript(cmd);
+ 	for (auto line : systems)
+@@ -2255,8 +2256,7 @@ bool ApiSystem::isScriptingSupported(ScriptId script)
+ 		executables.push_back("batocera-resolution");
+ 		break;
+ 	case ApiSystem::BIOSINFORMATION:
+-		executables.push_back("batocera-systems");
+-		break;
++		return Utils::FileSystem::exists(retroboxScript("retrobox-bios"));
+ 	case ApiSystem::DISKFORMAT:
+ 		executables.push_back("batocera-format");
+ 		break;
+diff --git a/es-app/src/guis/GuiMenu.cpp b/es-app/src/guis/GuiMenu.cpp
+index 7aee63f..54e656c 100644
+--- a/es-app/src/guis/GuiMenu.cpp
++++ b/es-app/src/guis/GuiMenu.cpp
+@@ -1980,7 +1980,6 @@ void GuiMenu::openSystemSettings()
+ 		if (ApiSystem::getInstance()->isScriptingSupported(ApiSystem::BIOSINFORMATION))
+ 		{
+ 			s->addEntry(_("MISSING BIOS CHECK"), true, [this, s] { openMissingBiosSettings(); });
+-			s->addSwitch(_("CHECK BIOS FILES BEFORE RUNNING A GAME"), "CheckBiosesAtLaunch", true);
+ 		}
+ 	}
+ #endif
+@@ -2917,11 +2916,6 @@ void GuiMenu::openGamesSettings()
+ 	{
+ 		s->addGroup(_("BIOS SETTINGS"));
+ 		s->addEntry(_("MISSING BIOS CHECK"), true, [this, s] { openMissingBiosSettings(); });
+-
+-		auto checkBiosesAtLaunch = std::make_shared<SwitchComponent>(mWindow);
+-		checkBiosesAtLaunch->setState(Settings::getInstance()->getBool("CheckBiosesAtLaunch"));
+-		s->addWithLabel(_("CHECK BIOS FILES BEFORE RUNNING A GAME"), checkBiosesAtLaunch);
+-		s->addSaveFunc([checkBiosesAtLaunch] { Settings::getInstance()->setBool("CheckBiosesAtLaunch", checkBiosesAtLaunch->getState()); });
+ 	}
+ 
+ 	// Custom config for systems
+diff --git a/es-app/src/views/ViewController.cpp b/es-app/src/views/ViewController.cpp
+index 4e92d18..761cf58 100644
+--- a/es-app/src/views/ViewController.cpp
++++ b/es-app/src/views/ViewController.cpp
+@@ -576,9 +576,9 @@ void ViewController::launch(FileData* game, LaunchGameOptions options, Vector3f
+ 		options.netPlayMode = SERVER;
+ 	
+ 	// runs during the launch transition
++	// No question about missing BIOS here: Retrobox's launcher checks them itself, for the
++	// emulator the game runs with (which may not be the system's), and says what is missing.
+ 	std::shared_future<bool> missingBios;
+-	if (allowCheckLaunchOptions)
+-		missingBios = checkMissingBiosAsync(game);
+ 
+ 	// stop zooming once the game art fills the screen, keeping its aspect ratio
+ 	float zoom = 1.0f;
