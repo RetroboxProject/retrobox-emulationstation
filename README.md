@@ -87,6 +87,7 @@ its own is plain EmulationStation and keeps its data in `~/.emulationstation`.
 | `0014` | *Missing BIOS check* through `$RETROBOX_ROOTDIR/bin/retrobox-bios` (same output as batocera's `batocera-systems`, `--filter SYSTEM` for one system); the entry shows when that script exists. EmulationStation's own question before each game (*Check BIOS files before running a game*) is removed, entry included: Retrobox's launcher checks the BIOS for the emulator the game runs with and says what is missing |
 | `0015` | When EmulationStation offers no way to quit (`ShowExit` off, which Retrobox's console mode sets), the window manager can't close it either: no `SDL_QUIT` when its window is asked to close (Alt+F4, `SDL_QUIT_ON_LAST_WINDOW_CLOSE`), and F4 no longer quits. A signal still ends it |
 | `0016` | The Content Downloader says which repository could not be read: `retrobox-store list` adds an `<error repository="...">` for each one (batocera's store, the libretro buildbot of RetroArch's cores), and they are shown in a message once the list is loaded, instead of an empty or partial list with no reason |
+| `0017` | *Enable navigation sounds* is on by default (upstream has it off), so a theme's menu sounds play out of the box; `retrobox-overlay` follows the same option for its own |
 
 They are split by topic so that when upstream drifts, the one that fails
 tells you where to look.

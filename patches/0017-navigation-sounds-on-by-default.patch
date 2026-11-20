@@ -1,0 +1,13 @@
+diff --git a/es-core/src/Settings.cpp b/es-core/src/Settings.cpp
+index 7d68718..38dc99d 100644
+--- a/es-core/src/Settings.cpp
++++ b/es-core/src/Settings.cpp
+@@ -183,7 +183,7 @@ void Settings::setDefaults()
+ 
+ 	mBoolMap["PublicWebAccess"] = false;	
+ 	mBoolMap["FirstJoystickOnly"] = false;
+-    mBoolMap["EnableSounds"] = false;
++    mBoolMap["EnableSounds"] = true;
+ 	mBoolMap["ShowHelpPrompts"] = true;
+ 	mBoolMap["ScrapeRatings"] = true;
+ 	mBoolMap["ScrapeNames"] = true;	
