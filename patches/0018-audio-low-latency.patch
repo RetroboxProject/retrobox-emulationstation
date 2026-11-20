@@ -1,0 +1,38 @@
+diff --git a/es-core/src/AudioManager.cpp b/es-core/src/AudioManager.cpp
+index 6ccef4a..5d50833 100644
+--- a/es-core/src/AudioManager.cpp
++++ b/es-core/src/AudioManager.cpp
+@@ -69,7 +69,9 @@ void AudioManager::init()
+ 	std::deque<std::string> mLastPlayed;
+ 
+ #ifdef __linux__
+-	SDL_SetHint(SDL_HINT_AUDIODRIVER, "pipewire,alsa");
++	// PulseAudio before ALSA: on a PulseAudio system, ALSA's default device goes through
++	// the pulse plugin, which adds its own buffering on top of SDL's
++	SDL_SetHint(SDL_HINT_AUDIODRIVER, "pipewire,pulseaudio,alsa");
+ #endif
+ 
+ 	if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0)
+@@ -82,6 +84,8 @@ void AudioManager::init()
+ 	int audioChunk = 4096;
+ #if defined(__linux__) && !defined(BCM2711)
+ 	audioRate = 48000;
++	// With any backend: 4096 frames are 85 ms between a key press and its navigation sound
++	audioChunk = 1024;
+ #endif
+ 	// Match the PipeWire graph so a video preview's stream doesn't change the quantum under the music
+ 	const char* audioDriver = SDL_GetCurrentAudioDriver();
+@@ -96,7 +100,12 @@ void AudioManager::init()
+ 	}
+ 	else
+ 	{
+-		LOG(LogInfo) << "SDL AUDIO Initialized";
++		int openedRate = 0;
++		Uint16 openedFormat = 0;
++		int openedChannels = 0;
++		Mix_QuerySpec(&openedRate, &openedFormat, &openedChannels);
++		LOG(LogInfo) << "SDL AUDIO Initialized (" << (audioDriver != nullptr ? audioDriver : "?")
++			<< ", " << openedRate << " Hz, " << audioChunk << " frames)";
+ 		mInitialized = true;
+ 
+ 		// Reload known sounds
