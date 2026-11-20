@@ -107,10 +107,15 @@ It runs **every two months, on the 13th** (January, March, May, July,
 September, November), **on demand** from Actions → build → *Run workflow*
 (with an optional upstream ref), and when patches or packaging change. Pull requests build and test but never publish.
 
+Besides, **every Monday** `drift.yml` only checks that the patches still apply
+to upstream master (no build, no release), and opens the same `upstream-drift`
+issue when one doesn't, so a patch is fixed while upstream's change is small.
+
 ### When a patch stops applying
 
 ```bash
-scripts/fetch.sh work/src          # names the patch that fails
+scripts/fetch.sh work/src          # names the patch that fails, prints its rejected
+                                   # hunks and the upstream code where they go now
 cd work/src
 git apply --reject ../../patches/0002-*.patch   # fix by hand, then regenerate:
 git diff -- <files> > ../../patches/0002-....patch

@@ -1,0 +1,45 @@
+name: drift
+
+# Every week, checks that patches/*.patch still apply to the latest commit of
+# upstream master, without building anything (releases stay every two months,
+# in build.yml). When one doesn't, the job fails with the rejected hunks and
+# the upstream code where they should go now (scripts/fetch.sh), and one
+# `upstream-drift` issue is opened, so the patch is fixed while the change is
+# still small.
+on:
+  schedule:
+    - cron: '41 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  patches:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check that the patches apply to upstream master
+        run: scripts/fetch.sh --ref master "${RUNNER_TEMP}/check"
+
+  notify:
+    needs: patches
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open an issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          gh label create upstream-drift --repo "${REPO}" --color B60205 \
+            --description 'Scheduled build failed' >/dev/null 2>&1 || true
+          if [[ -z "$(gh issue list --repo "${REPO}" --label upstream-drift --state open --json number --jq '.[0].number')" ]]; then
+            gh issue create --repo "${REPO}" --label upstream-drift \
+              --title 'A patch no longer applies to upstream master' \
+              --body "The weekly check failed: its log has the rejected hunks and the upstream code where they should go now. See ${RUN_URL}"
+          fi
