@@ -1,0 +1,113 @@
+diff --git a/es-app/src/ApiSystem.cpp b/es-app/src/ApiSystem.cpp
+index 433d051..19fd1ee 100644
+--- a/es-app/src/ApiSystem.cpp
++++ b/es-app/src/ApiSystem.cpp
+@@ -2523,7 +2523,8 @@ std::vector<std::string> ApiSystem::extractPdfImages(const std::string& fileName
+ }
+ 
+ 
+-std::vector<PacmanPackage> ApiSystem::getBatoceraStorePackages()
++// errors: the <error repository="..."> of the listing, a repository that could not be read
++std::vector<PacmanPackage> ApiSystem::getBatoceraStorePackages(std::vector<std::string>* errors)
+ {
+ 	std::vector<PacmanPackage> packages;
+ 
+@@ -2534,6 +2535,8 @@ std::vector<PacmanPackage> ApiSystem::getBatoceraStorePackages()
+ 	if (data.empty())
+ 	{
+ 		LOG(LogError) << "Package list is empty";
++		if (errors != nullptr)
++			errors->push_back(_("The list of content could not be read."));
+ 		return packages;
+ 	}
+ 
+@@ -2552,6 +2555,15 @@ std::vector<PacmanPackage> ApiSystem::getBatoceraStorePackages()
+ 		return packages;
+ 	}
+ 
++	for (pugi::xml_node errorNode = root.child("error"); errorNode; errorNode = errorNode.next_sibling("error"))
++	{
++		std::string repository = errorNode.attribute("repository").as_string();
++		std::string message = errorNode.text().get();
++		LOG(LogError) << "Content repository " << repository << ": " << message;
++		if (errors != nullptr)
++			errors->push_back(repository.empty() ? message : repository + ": " + message);
++	}
++
+ 	for (pugi::xml_node pkgNode = root.child("package"); pkgNode; pkgNode = pkgNode.next_sibling("package"))
+ 	{
+ 		PacmanPackage package;
+diff --git a/es-app/src/ApiSystem.h b/es-app/src/ApiSystem.h
+index d5376c4..95cd8a7 100644
+--- a/es-app/src/ApiSystem.h
++++ b/es-app/src/ApiSystem.h
+@@ -338,7 +338,7 @@ public:
+ 	virtual std::string getRunningArchitecture();
+ 	virtual std::string getRunningBoard();
+ 
+-	std::vector<PacmanPackage> getBatoceraStorePackages();
++	std::vector<PacmanPackage> getBatoceraStorePackages(std::vector<std::string>* errors = nullptr);
+ 	std::pair<std::string, int> installBatoceraStorePackage(std::string name, const std::function<void(const std::string)>& func = nullptr);
+ 	std::pair<std::string, int> uninstallBatoceraStorePackage(std::string name, const std::function<void(const std::string)>& func = nullptr);
+ 	void updateBatoceraStorePackageList();
+diff --git a/es-app/src/guis/GuiBatoceraStore.cpp b/es-app/src/guis/GuiBatoceraStore.cpp
+index df5773b..e304764 100644
+--- a/es-app/src/guis/GuiBatoceraStore.cpp
++++ b/es-app/src/guis/GuiBatoceraStore.cpp
+@@ -250,10 +250,10 @@ void GuiBatoceraStore::loadList(bool updatePackageList, bool restoreIndex)
+ 	mReloadList = 0;
+ }
+ 
+-std::vector<PacmanPackage> GuiBatoceraStore::queryPackages()
++std::vector<PacmanPackage> GuiBatoceraStore::queryPackages(std::vector<std::string>* errors)
+ {
+ 	auto systemNames = SystemData::getKnownSystemNames();
+-	auto packages = ApiSystem::getInstance()->getBatoceraStorePackages();
++	auto packages = ApiSystem::getInstance()->getBatoceraStorePackages(errors);
+ 
+ 	std::vector<PacmanPackage> copy;
+ 	for (auto& package : packages)
+@@ -286,9 +286,11 @@ std::vector<PacmanPackage> GuiBatoceraStore::queryPackages()
+ void GuiBatoceraStore::loadPackagesAsync(bool updatePackageList, bool refreshOnly)
+ {
+ 	Window* window = mWindow;
++	// a repository that can't be read (the server is down or blocked) is said, not just empty
++	auto errors = std::make_shared<std::vector<std::string>>();
+ 
+ 	mWindow->pushGui(new GuiLoading<std::vector<PacmanPackage>>(mWindow, _("PLEASE WAIT"),
+-		[this,  updatePackageList, refreshOnly](auto gui)
++		[this,  updatePackageList, refreshOnly, errors](auto gui)
+ 		{	
+ 			if (updatePackageList)
+ 				if (refreshOnly)
+@@ -296,12 +298,15 @@ void GuiBatoceraStore::loadPackagesAsync(bool updatePackageList, bool refreshOnl
+ 				else
+ 					ApiSystem::getInstance()->updateBatoceraStorePackageList();
+ 
+-			return queryPackages();
++			return queryPackages(errors.get());
+ 		},
+-		[this, updatePackageList](std::vector<PacmanPackage> packages)
++		[this, window, updatePackageList, errors](std::vector<PacmanPackage> packages)
+ 		{		
+ 			mPackages = packages;
+ 			loadList(updatePackageList);
++
++			if (!errors->empty())
++				window->pushGui(new GuiMsgBox(window, Utils::String::join(*errors, "\n"), _("OK"), nullptr));
+ 		}
+ 		));
+ }
+diff --git a/es-app/src/guis/GuiBatoceraStore.h b/es-app/src/guis/GuiBatoceraStore.h
+index dc86ffe..d85894f 100644
+--- a/es-app/src/guis/GuiBatoceraStore.h
++++ b/es-app/src/guis/GuiBatoceraStore.h
+@@ -50,7 +50,7 @@ public:
+ 	void OnContentInstalled(int contentType, std::string contentName, bool success) override;
+ 
+ private:
+-	static std::vector<PacmanPackage> queryPackages();
++	static std::vector<PacmanPackage> queryPackages(std::vector<std::string>* errors = nullptr);
+ 	void loadPackagesAsync(bool updatePackageList = false, bool refreshOnly = true);
+ 	void loadList(bool updatePackageList, bool restoreIndex = true);
+ 	void processPackage(PacmanPackage package);

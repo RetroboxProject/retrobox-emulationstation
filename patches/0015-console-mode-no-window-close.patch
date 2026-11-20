@@ -1,0 +1,39 @@
+diff --git a/es-app/src/main.cpp b/es-app/src/main.cpp
+index 06b1849..ed606b3 100644
+--- a/es-app/src/main.cpp
++++ b/es-app/src/main.cpp
+@@ -22,6 +22,7 @@
+ #include "SystemData.h"
+ #include "SystemScreenSaver.h"
+ #include <SDL_events.h>
++#include <SDL_hints.h>
+ #include <SDL_main.h>
+ #include <SDL_timer.h>
+ #include <iostream>
+@@ -637,6 +638,12 @@ int main(int argc, char* argv[])
+ 	threadPool->queueWorkItem([] { HttpReq::resetCookies(); });
+ 	threadPool->start();
+ 
++	// Without a way to quit EmulationStation (ShowExit off, Retrobox's console mode), the
++	// window manager can't close it either (Alt+F4): SDL then sends no SDL_QUIT when its
++	// only window is asked to close. A signal (SIGTERM, a log out) still ends it.
++	if (!Settings::getInstance()->getBool("ShowExit"))
++		SDL_SetHint("SDL_QUIT_ON_LAST_WINDOW_CLOSE", "0");
++
+ 	Window window;
+ 	ViewController::init(&window);
+ 
+diff --git a/es-core/src/InputManager.cpp b/es-core/src/InputManager.cpp
+index 902d281..c9e519d 100644
+--- a/es-core/src/InputManager.cpp
++++ b/es-core/src/InputManager.cpp
+@@ -781,7 +781,8 @@ bool InputManager::parseEvent(const SDL_Event& ev, Window* window)
+ 			return false;
+ 
+ #if !WIN32
+-		if (ev.key.keysym.sym == SDLK_F4)
++		// F4 quits, unless quitting is not offered (ShowExit off)
++		if (ev.key.keysym.sym == SDLK_F4 && Settings::getInstance()->getBool("ShowExit"))
+ 		{
+ 			SDL_Event* quit = new SDL_Event();
+ 			quit->type = SDL_QUIT;
