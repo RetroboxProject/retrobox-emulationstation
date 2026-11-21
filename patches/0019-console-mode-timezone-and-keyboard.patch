@@ -1,5 +1,5 @@
 diff --git a/es-app/src/ApiSystem.cpp b/es-app/src/ApiSystem.cpp
-index 19fd1ee..baa7d3e 100644
+index 19fd1ee..3e5110c 100644
 --- a/es-app/src/ApiSystem.cpp
 +++ b/es-app/src/ApiSystem.cpp
 @@ -2287,8 +2287,7 @@ bool ApiSystem::isScriptingSupported(ScriptId script)
@@ -12,21 +12,24 @@ index 19fd1ee..baa7d3e 100644
  	case ApiSystem::AUDIODEVICE:
  		executables.push_back("batocera-audio");
  		break;		
-@@ -2744,16 +2743,34 @@ std::vector<std::string> ApiSystem::getTimezones()
+@@ -2744,16 +2743,37 @@ std::vector<std::string> ApiSystem::getTimezones()
  	return ret;
  }
  
 +// retrobox: console mode (no way to quit EmulationStation: ShowExit off) offers the
-+// system's time zone and keyboard layout, which retrobox-system reads and sets
++// system's time zone and keyboard layout when the machine has a system settings program
++// (retrobox-system-settings, provided by what makes it a console): Retrobox writes its path
++// into RetroboxSystemSettings before EmulationStation starts, empty when there is none
 +bool ApiSystem::hasConsoleSettings()
 +{
-+	return !Settings::getInstance()->getBool("ShowExit") &&
-+		Utils::FileSystem::exists(retroboxScript("retrobox-system"));
++	std::string program = Settings::getInstance()->getString("RetroboxSystemSettings");
++	return !Settings::getInstance()->getBool("ShowExit") && !program.empty() &&
++		Utils::FileSystem::exists(program);
 +}
 +
 +std::string ApiSystem::getRetroboxSystemCommand()
 +{
-+	return "\"" + retroboxScript("retrobox-system") + "\"";
++	return "\"" + Settings::getInstance()->getString("RetroboxSystemSettings") + "\"";
 +}
 +
 +std::pair<std::string, int> ApiSystem::setSystemTimezone(const std::string& tz)
@@ -54,7 +57,7 @@ index 19fd1ee..baa7d3e 100644
  	return tz;
  }
  
-@@ -2761,7 +2778,7 @@ bool ApiSystem::setTimezone(std::string tz)
+@@ -2761,7 +2781,7 @@ bool ApiSystem::setTimezone(std::string tz)
  {
  	if (tz.empty())
  		return false;
@@ -64,14 +67,14 @@ index 19fd1ee..baa7d3e 100644
  
  std::vector<PadInfo> ApiSystem::getPadsInfo()
 diff --git a/es-app/src/ApiSystem.h b/es-app/src/ApiSystem.h
-index 95cd8a7..8b82f1b 100644
+index 95cd8a7..86ae3df 100644
 --- a/es-app/src/ApiSystem.h
 +++ b/es-app/src/ApiSystem.h
 @@ -388,6 +388,13 @@ public:
  	virtual std::string getCurrentTimezone();
  	virtual bool setTimezone(std::string tz);
  
-+	// retrobox: console mode's time zone and keyboard layout (retrobox-system)
++	// retrobox: console mode's time zone and keyboard layout (the system settings program)
 +	bool hasConsoleSettings();
 +	std::string getRetroboxSystemCommand();
 +	// both return the last output line (the reason, when it fails) and the exit status
@@ -82,7 +85,7 @@ index 95cd8a7..8b82f1b 100644
  	virtual std::string getHostsName();
  	virtual bool emuKill();
 diff --git a/es-app/src/guis/GuiMenu.cpp b/es-app/src/guis/GuiMenu.cpp
-index 54e656c..d7f3b04 100644
+index 54e656c..c254d77 100644
 --- a/es-app/src/guis/GuiMenu.cpp
 +++ b/es-app/src/guis/GuiMenu.cpp
 @@ -1501,20 +1501,28 @@ void GuiMenu::openSystemSettings()
@@ -95,8 +98,8 @@ index 54e656c..d7f3b04 100644
 -	std::string curLayout = SystemConf::getInstance()->get("system.kblayout");
 -	if (curLayout.empty()) curLayout = "us";
 +	// retrobox: the keyboard layout is the system's. On a desktop it belongs to the desktop
-+	// session; in console mode (EmulationStation is the only screen) it is offered here, and
-+	// retrobox-system reads and sets the system's own (localectl).
++	// session; in console mode (EmulationStation is the only screen) it is offered here when
++	// the machine has a system settings program, which reads and sets it.
 +#if !WIN32
 +	if (ApiSystem::getInstance()->hasConsoleSettings())
 +	{
@@ -186,7 +189,7 @@ index 54e656c..d7f3b04 100644
  
  			s->addWithLabel(_("TIME ZONE"), tzChoices);
 -			s->addSaveFunc([tzChoices]
-+			// retrobox: the system's time zone, set at once (retrobox-system, timedatectl)
++			// retrobox: the system's time zone, set at once by the system settings program
 +			Window* tzWindow = mWindow;
 +			s->addSaveFunc([tzChoices, tzWindow]
  			{
@@ -201,3 +204,15 @@ index 54e656c..d7f3b04 100644
  			});
  		}
  	}
+diff --git a/es-core/src/Settings.cpp b/es-core/src/Settings.cpp
+index 38dc99d..a14dcab 100644
+--- a/es-core/src/Settings.cpp
++++ b/es-core/src/Settings.cpp
+@@ -170,6 +170,7 @@ void Settings::setDefaults()
+     mIntMap["SystemVolume"] = 95;
+     mBoolMap["Overscan"] = false;
+     mStringMap["Language"] = ""; // retrobox: empty = auto (system language)
++    mStringMap["RetroboxSystemSettings"] = ""; // retrobox: console mode's system settings program, set by Retrobox
+     mStringMap["INPUT P1"] = "DEFAULT";
+     mStringMap["INPUT P2"] = "DEFAULT";
+     mStringMap["INPUT P3"] = "DEFAULT";
