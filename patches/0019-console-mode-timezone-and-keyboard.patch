@@ -1,0 +1,203 @@
+diff --git a/es-app/src/ApiSystem.cpp b/es-app/src/ApiSystem.cpp
+index 19fd1ee..baa7d3e 100644
+--- a/es-app/src/ApiSystem.cpp
++++ b/es-app/src/ApiSystem.cpp
+@@ -2287,8 +2287,7 @@ bool ApiSystem::isScriptingSupported(ScriptId script)
+ 		executables.push_back("batocera-preupdate-gamelists-hook");
+ 		break;
+ 	case ApiSystem::TIMEZONES:
+-		executables.push_back("batocera-timezone");
+-		break;
++		return hasConsoleSettings();
+ 	case ApiSystem::AUDIODEVICE:
+ 		executables.push_back("batocera-audio");
+ 		break;		
+@@ -2744,16 +2743,34 @@ std::vector<std::string> ApiSystem::getTimezones()
+ 	return ret;
+ }
+ 
++// retrobox: console mode (no way to quit EmulationStation: ShowExit off) offers the
++// system's time zone and keyboard layout, which retrobox-system reads and sets
++bool ApiSystem::hasConsoleSettings()
++{
++	return !Settings::getInstance()->getBool("ShowExit") &&
++		Utils::FileSystem::exists(retroboxScript("retrobox-system"));
++}
++
++std::string ApiSystem::getRetroboxSystemCommand()
++{
++	return "\"" + retroboxScript("retrobox-system") + "\"";
++}
++
++std::pair<std::string, int> ApiSystem::setSystemTimezone(const std::string& tz)
++{
++	return executeScript(getRetroboxSystemCommand() + " timezone set \"" + tz + "\"", nullptr);
++}
++
++std::pair<std::string, int> ApiSystem::setSystemKeyboard(const std::string& layout, const std::string& variant)
++{
++	return executeScript(getRetroboxSystemCommand() + " keyboard set \"" + layout + "\" \"" + variant + "\"", nullptr);
++}
++
+ std::string ApiSystem::getCurrentTimezone()
+ {
+ 	LOG(LogInfo) << "ApiSystem::getCurrentTimezone";
+-	auto cmd = executeEnumerationScript("batocera-timezone get");
+-	std::string tz = Utils::String::join(cmd, "");
+-	remove_if(tz.begin(), tz.end(), isspace);
+-	if (tz.empty()) {
+-		cmd = executeEnumerationScript("batocera-timezone detect");
+-		tz = Utils::String::join(cmd, "");
+-	}
++	auto cmd = executeEnumerationScript(getRetroboxSystemCommand() + " timezone get");
++	std::string tz = Utils::String::trim(Utils::String::join(cmd, ""));
+ 	return tz;
+ }
+ 
+@@ -2761,7 +2778,7 @@ bool ApiSystem::setTimezone(std::string tz)
+ {
+ 	if (tz.empty())
+ 		return false;
+-	return executeScript("batocera-timezone set \"" + tz + "\"");
++	return setSystemTimezone(tz).second == 0;
+ }
+ 
+ std::vector<PadInfo> ApiSystem::getPadsInfo()
+diff --git a/es-app/src/ApiSystem.h b/es-app/src/ApiSystem.h
+index 95cd8a7..8b82f1b 100644
+--- a/es-app/src/ApiSystem.h
++++ b/es-app/src/ApiSystem.h
+@@ -388,6 +388,13 @@ public:
+ 	virtual std::string getCurrentTimezone();
+ 	virtual bool setTimezone(std::string tz);
+ 
++	// retrobox: console mode's time zone and keyboard layout (retrobox-system)
++	bool hasConsoleSettings();
++	std::string getRetroboxSystemCommand();
++	// both return the last output line (the reason, when it fails) and the exit status
++	std::pair<std::string, int> setSystemTimezone(const std::string& tz);
++	std::pair<std::string, int> setSystemKeyboard(const std::string& layout, const std::string& variant);
++
+ 	virtual std::vector<PadInfo> getPadsInfo();
+ 	virtual std::string getHostsName();
+ 	virtual bool emuKill();
+diff --git a/es-app/src/guis/GuiMenu.cpp b/es-app/src/guis/GuiMenu.cpp
+index 54e656c..d7f3b04 100644
+--- a/es-app/src/guis/GuiMenu.cpp
++++ b/es-app/src/guis/GuiMenu.cpp
+@@ -1501,20 +1501,28 @@ void GuiMenu::openSystemSettings()
+ 	});
+ 
+ 	// Keyboard layout & variant
+-	// retrobox: the keyboard layout belongs to the system (desktop session), not to the frontend
+-#if !WIN32 && defined(RETROBOX_KEYBOARD_MENU)
+-
+-	std::string curLayout = SystemConf::getInstance()->get("system.kblayout");
+-	if (curLayout.empty()) curLayout = "us";
++	// retrobox: the keyboard layout is the system's. On a desktop it belongs to the desktop
++	// session; in console mode (EmulationStation is the only screen) it is offered here, and
++	// retrobox-system reads and sets the system's own (localectl).
++#if !WIN32
++	if (ApiSystem::getInstance()->hasConsoleSettings())
++	{
++	const std::string keyboardCmd = ApiSystem::getInstance()->getRetroboxSystemCommand() + " keyboard";
+ 
+-	std::string curVariant = SystemConf::getInstance()->get("system.kbvariant");
+-	if (curVariant.empty()) curVariant = "none";
++	std::string curLayout = "us";
++	std::string curVariant = "none";
++	for (const auto& current : getScriptOutput(keyboardCmd + " get"))
++	{
++		curLayout = current.first;
++		if (!current.second.empty()) curVariant = current.second;
++		break;
++	}
+ 
+ 	auto keyboard_layout = std::make_shared<OptionListComponent<std::string>>(window, _("KEYBOARD LAYOUT"), false);
+ 	auto keyboard_variant = std::make_shared<OptionListComponent<std::string>>(window, _("KEYBOARD VARIANT"), false);
+ 
+ 	// Populate Layouts
+-	auto layouts = getScriptOutput("batocera-keyboard list-layouts");
++	auto layouts = getScriptOutput(keyboardCmd + " list-layouts");
+ 	bool layoutFound = false;
+ 
+ 	for (const auto& l : layouts)
+@@ -1528,12 +1536,12 @@ void GuiMenu::openSystemSettings()
+ 	}
+ 
+ 	// Populate Variants
+-	auto populateVariants = [keyboard_variant, curVariant](std::string layoutCode) {
++	auto populateVariants = [keyboard_variant, curVariant, keyboardCmd](std::string layoutCode) {
+ 		keyboard_variant->clear();
+ 		bool noneSelected = (curVariant == "none" || curVariant.empty());
+ 		keyboard_variant->add(_("NONE"), "none", noneSelected);
+ 
+-		auto variants = getScriptOutput("batocera-keyboard list-variants " + layoutCode);
++		auto variants = getScriptOutput(keyboardCmd + " list-variants \"" + layoutCode + "\"");
+ 		bool variantFound = false;
+ 		for (const auto& v : variants)
+ 		{
+@@ -1551,11 +1559,11 @@ void GuiMenu::openSystemSettings()
+ 	populateVariants(curLayout);
+ 
+ 	// Callback for layout change
+-	keyboard_layout->setSelectedChangedCallback([populateVariants, keyboard_variant](std::string newLayout) {
++	keyboard_layout->setSelectedChangedCallback([populateVariants, keyboard_variant, keyboardCmd](std::string newLayout) {
+ 		keyboard_variant->clear();
+ 		keyboard_variant->add(_("NONE"), "none", true);
+ 
+-		auto variants = getScriptOutput("batocera-keyboard list-variants " + newLayout);
++		auto variants = getScriptOutput(keyboardCmd + " list-variants \"" + newLayout + "\"");
+ 		for (const auto& v : variants)
+ 		{
+ 			keyboard_variant->add(v.second, v.first, false);
+@@ -1569,22 +1577,21 @@ void GuiMenu::openSystemSettings()
+ 	s->addWithDescription(_("KEYBOARD LAYOUT"), kbHelpText, keyboard_layout);
+ 	s->addWithDescription(_("KEYBOARD VARIANT"), kbHelpText, keyboard_variant);
+ 
+-	s->addSaveFunc([keyboard_layout, keyboard_variant, s] {
++	s->addSaveFunc([keyboard_layout, keyboard_variant, s, window] {
+ 		if (keyboard_layout->changed() || keyboard_variant->changed())
+ 		{
+ 			std::string selLayout = keyboard_layout->getSelected();
+ 			std::string selVariant = keyboard_variant->getSelected();
+ 
+-			std::string cmd = "batocera-keyboard set \"" + selLayout + "\" \"" + selVariant + "\"";
+-			if (system(cmd.c_str()) == 0) {
+-				SystemConf::getInstance()->set("system.kblayout", selLayout);
+-				SystemConf::getInstance()->set("system.kbvariant", selVariant);
+-
+-				// Trigger the standard "Reboot Required" notification on menu exit
++			// the system's keyboard, which the session reads when it starts again
++			auto result = ApiSystem::getInstance()->setSystemKeyboard(selLayout, selVariant);
++			if (result.second == 0)
+ 				s->setVariable("reboot", true);
+-			}
++			else
++				window->pushGui(new GuiMsgBox(window, result.first, _("OK"), nullptr));
+ 		}
+ 	});
++	}
+ #endif
+ 
+ 	// Timezone
+@@ -1603,10 +1610,16 @@ void GuiMenu::openSystemSettings()
+ 				tzChoices->add(_(Utils::String::toUpper(tz).c_str()), tz, currentTZ == tz);
+ 
+ 			s->addWithLabel(_("TIME ZONE"), tzChoices);
+-			s->addSaveFunc([tzChoices]
++			// retrobox: the system's time zone, set at once (retrobox-system, timedatectl)
++			Window* tzWindow = mWindow;
++			s->addSaveFunc([tzChoices, tzWindow]
+ 			{
+-				if (SystemConf::getInstance()->set("system.timezone", tzChoices->getSelected()))
+-					ApiSystem::getInstance()->setTimezone(tzChoices->getSelected());
++				if (!tzChoices->changed())
++					return;
++
++				auto result = ApiSystem::getInstance()->setSystemTimezone(tzChoices->getSelected());
++				if (result.second != 0)
++					tzWindow->pushGui(new GuiMsgBox(tzWindow, result.first, _("OK"), nullptr));
+ 			});
+ 		}
+ 	}

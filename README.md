@@ -89,6 +89,7 @@ its own is plain EmulationStation and keeps its data in `~/.emulationstation`.
 | `0016` | The Content Downloader says which repository could not be read: `retrobox-store list` adds an `<error repository="...">` for each one (batocera's store, the libretro buildbot of RetroArch's cores), and they are shown in a message once the list is loaded, instead of an empty or partial list with no reason |
 | `0017` | *Enable navigation sounds* is on by default (upstream has it off), so a theme's menu sounds play out of the box; `retrobox-overlay` follows the same option for its own |
 | `0018` | Navigation sounds play with the key press: the audio buffer is 1024 frames (21 ms at 48 kHz) with every backend, not only PipeWire (ALSA got 4096, 85 ms late), and PulseAudio comes before ALSA (whose default device would go through the pulse plugin). The log says which backend, rate and buffer it got |
+| `0019` | In console mode (no way to quit EmulationStation: `ShowExit` off), *System settings* offer the system's **time zone** and **keyboard layout and variant**, as batocera's do, through `$RETROBOX_ROOTDIR/bin/retrobox-system` (in place of `batocera-timezone` and `batocera-keyboard`): they are the system's own (timedatectl, localectl), read back from it, and a failure says why. On a desktop both stay hidden: they belong to the desktop |
 
 They are split by topic so that when upstream drifts, the one that fails
 tells you where to look.
