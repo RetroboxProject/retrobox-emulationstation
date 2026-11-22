@@ -1,0 +1,141 @@
+diff --git a/es-app/src/ApiSystem.cpp b/es-app/src/ApiSystem.cpp
+index 36a56f8..ce6d575 100644
+--- a/es-app/src/ApiSystem.cpp
++++ b/es-app/src/ApiSystem.cpp
+@@ -2797,6 +2797,25 @@ std::pair<std::string, int> ApiSystem::setSystemLanguage(const std::string& lang
+ 	return executeScript(getRetroboxSystemCommand() + " locale set \"" + language + "\"", nullptr);
+ }
+ 
++// retrobox: XDP's DNS over TLS (dns.xdp.es), a drop-in of systemd-resolved that
++// retrobox-xdp-dns (retrobox-system-settings) writes and removes; NetworkManager is
++// left alone. status prints "on" or "off" and exits 0; a machine without
++// retrobox-xdp-dns in the PATH makes the shell exit 127, and the toggle is not offered.
++int ApiSystem::getXdpDnsState()
++{
++	auto status = executeScript("retrobox-xdp-dns status 2>/dev/null", nullptr);
++	if (status.second != 0)
++		return -1;
++
++	return Utils::String::trim(status.first) == "on" ? 1 : 0;
++}
++
++std::pair<std::string, int> ApiSystem::setXdpDns(bool enable)
++{
++	// the last output line is the reason when it fails (the scripts' convention)
++	return executeScript(std::string("retrobox-xdp-dns ") + (enable ? "on" : "off") + " 2>&1", nullptr);
++}
++
+ std::string ApiSystem::getCurrentTimezone()
+ {
+ 	LOG(LogInfo) << "ApiSystem::getCurrentTimezone";
+diff --git a/es-app/src/ApiSystem.h b/es-app/src/ApiSystem.h
+index 7336c90..f9e29ac 100644
+--- a/es-app/src/ApiSystem.h
++++ b/es-app/src/ApiSystem.h
+@@ -399,6 +399,11 @@ public:
+ 	std::vector<std::string> getSystemLanguages();
+ 	std::string getSystemLanguage();
+ 	std::pair<std::string, int> setSystemLanguage(const std::string& language);
++	// retrobox: XDP's DNS over TLS (a drop-in of systemd-resolved), toggled from the
++	// network settings through retrobox-xdp-dns (retrobox-system-settings):
++	// 1 on, 0 off, -1 when this machine has no retrobox-xdp-dns
++	int getXdpDnsState();
++	std::pair<std::string, int> setXdpDns(bool enable);
+ 
+ 	virtual std::vector<PadInfo> getPadsInfo();
+ 	virtual std::string getHostsName();
+diff --git a/es-app/src/guis/GuiNetworkSettings.cpp b/es-app/src/guis/GuiNetworkSettings.cpp
+index 5de74e8..34ef982 100644
+--- a/es-app/src/guis/GuiNetworkSettings.cpp
++++ b/es-app/src/guis/GuiNetworkSettings.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "guis/GuiNetworkSettings.h"
+ 
++#include "ApiSystem.h"
+ #include "GuiLoading.h"
+ #include "LocaleES.h"
+ #include "Log.h"
+@@ -38,6 +39,9 @@ namespace
+ 			return _("NO CABLE");
+ 		}
+ 	}
++
++	// autoSel of the XDP DNS toggle: the Ethernet rows take 3 and up, one per adapter
++	constexpr int XDP_DNS_SEL = 1000;
+ }
+ 
+ GuiNetworkSettings::GuiNetworkSettings(Window* window, int autoSel) : GuiSettings(window, _("NETWORK SETTINGS").c_str())
+@@ -120,6 +124,24 @@ GuiNetworkSettings::GuiNetworkSettings(Window* window, int autoSel) : GuiSetting
+ 			}
+ 		}, "", autoSel == sel);
+ 	}
++
++	// DNS: XDP's DNS over TLS (dns.xdp.es), a drop-in of systemd-resolved toggled with
++	// retrobox-xdp-dns (retrobox-system-settings); only offered when that command is
++	// there. NetworkManager keeps the links and their DHCP DNS: the two coexist.
++	const int xdpDnsState = ApiSystem::getInstance()->getXdpDnsState();
++	if (xdpDnsState >= 0)
++	{
++		addGroup(_("DNS"));
++
++		auto xdpDns = std::make_shared<SwitchComponent>(mWindow);
++		xdpDns->setState(xdpDnsState == 1);
++		addWithLabel(_("XDP DNS (DNS OVER TLS)"), xdpDns, autoSel == XDP_DNS_SEL);
++		xdpDns->setOnChangedCallback([this, xdpDns, wasOn = (xdpDnsState == 1)]
++		{
++			if (xdpDns->getState() != wasOn)
++				runXdpDns(xdpDns->getState(), XDP_DNS_SEL);
++		});
++	}
+ }
+ 
+ void GuiNetworkSettings::reopen(int autoSel)
+@@ -154,4 +176,25 @@ void GuiNetworkSettings::runEthernet(const std::string& devicePath, bool connect
+ 		}));
+ }
+ 
++void GuiNetworkSettings::runXdpDns(bool enable, int autoSel)
++{
++	Window* window = mWindow;
++
++	window->pushGui(new GuiLoading<std::pair<std::string, int>>(window, _("PLEASE WAIT"),
++		[enable](auto gui)
++		{
++			return ApiSystem::getInstance()->setXdpDns(enable);
++		},
++		[this, window, autoSel](std::pair<std::string, int> result)
++		{
++			if (result.second != 0)
++			{
++				LOG(LogError) << "XDP DNS: retrobox-xdp-dns " << (result.second == 127 ? "is gone" : "failed") << ": " << result.first;
++				window->pushGui(new GuiMsgBox(window, result.first.empty() ? _("THE OPERATION FAILED.") : _("THE OPERATION FAILED.") + "\n" + result.first));
++			}
++
++			reopen(autoSel);
++		}));
++}
++
+ #endif
+diff --git a/es-app/src/guis/GuiNetworkSettings.h b/es-app/src/guis/GuiNetworkSettings.h
+index 24b458a..21b71ff 100644
+--- a/es-app/src/guis/GuiNetworkSettings.h
++++ b/es-app/src/guis/GuiNetworkSettings.h
+@@ -5,7 +5,8 @@
+ #include "guis/GuiSettings.h"
+ 
+ // NETWORK SETTINGS on a desktop Linux: Wi-Fi (radio, current network, list of networks)
+-// and Ethernet (status, connect/disconnect), all through NetworkManager.
++// and Ethernet (status, connect/disconnect), all through NetworkManager; also XDP's
++// DNS over TLS as a toggle, when the machine has retrobox-xdp-dns.
+ class GuiNetworkSettings : public GuiSettings
+ {
+ public:
+@@ -15,6 +16,7 @@ public:
+ private:
+ 	void reopen(int autoSel);
+ 	void runEthernet(const std::string& devicePath, bool connect, int autoSel);
++	void runXdpDns(bool enable, int autoSel);
+ };
+ 
+ #endif
