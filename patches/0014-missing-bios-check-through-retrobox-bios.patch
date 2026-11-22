@@ -1,5 +1,5 @@
 diff --git a/es-app/src/ApiSystem.cpp b/es-app/src/ApiSystem.cpp
-index 330e302..433d051 100644
+index 330e30286caa0a6c4e171be65f817c1c3a624c34..433d051e6efcabe7d1ca780960dd906a0f77da2d 100644
 --- a/es-app/src/ApiSystem.cpp
 +++ b/es-app/src/ApiSystem.cpp
 @@ -819,9 +819,10 @@ std::vector<BiosSystem> ApiSystem::getBiosInformations(const std::string system)
@@ -25,43 +25,134 @@ index 330e302..433d051 100644
  	case ApiSystem::DISKFORMAT:
  		executables.push_back("batocera-format");
  		break;
-diff --git a/es-app/src/guis/GuiMenu.cpp b/es-app/src/guis/GuiMenu.cpp
-index 7aee63f..54e656c 100644
---- a/es-app/src/guis/GuiMenu.cpp
-+++ b/es-app/src/guis/GuiMenu.cpp
-@@ -1980,7 +1980,6 @@ void GuiMenu::openSystemSettings()
- 		if (ApiSystem::getInstance()->isScriptingSupported(ApiSystem::BIOSINFORMATION))
- 		{
- 			s->addEntry(_("MISSING BIOS CHECK"), true, [this, s] { openMissingBiosSettings(); });
--			s->addSwitch(_("CHECK BIOS FILES BEFORE RUNNING A GAME"), "CheckBiosesAtLaunch", true);
- 		}
- 	}
- #endif
-@@ -2917,11 +2916,6 @@ void GuiMenu::openGamesSettings()
- 	{
- 		s->addGroup(_("BIOS SETTINGS"));
- 		s->addEntry(_("MISSING BIOS CHECK"), true, [this, s] { openMissingBiosSettings(); });
--
--		auto checkBiosesAtLaunch = std::make_shared<SwitchComponent>(mWindow);
--		checkBiosesAtLaunch->setState(Settings::getInstance()->getBool("CheckBiosesAtLaunch"));
--		s->addWithLabel(_("CHECK BIOS FILES BEFORE RUNNING A GAME"), checkBiosesAtLaunch);
--		s->addSaveFunc([checkBiosesAtLaunch] { Settings::getInstance()->setBool("CheckBiosesAtLaunch", checkBiosesAtLaunch->getState()); });
- 	}
- 
- 	// Custom config for systems
 diff --git a/es-app/src/views/ViewController.cpp b/es-app/src/views/ViewController.cpp
-index 4e92d18..761cf58 100644
+index 4e92d18adbc01ebcb53388f2af3d57fd8c5810c7..1770d70487b04f1a86718ca2ca51949c45522fc8 100644
 --- a/es-app/src/views/ViewController.cpp
 +++ b/es-app/src/views/ViewController.cpp
-@@ -576,9 +576,9 @@ void ViewController::launch(FileData* game, LaunchGameOptions options, Vector3f
+@@ -492,23 +492,18 @@ bool ViewController::checkLaunchOptions(FileData* game, LaunchGameOptions option
+ 	return true;
+ }
+ 
+-std::shared_future<bool> ViewController::checkMissingBiosAsync(FileData* game)
++bool ViewController::hasMissingBios(FileData* game)
+ {
+ 	if (!Settings::getInstance()->getBool("CheckBiosesAtLaunch") || !ApiSystem::getInstance()->isScriptingSupported(ApiSystem::ScriptId::BIOSINFORMATION))
+-		return std::shared_future<bool>();
++		return false;
+ 
+-	auto sourceSystemName = game->getSourceFileData()->getSystem()->getName();
++	auto bios = ApiSystem::getInstance()->getBiosInformations(game->getSourceFileData()->getSystem()->getName());
+ 	auto systemName = game->getSystem()->getName();
++	auto it = std::find_if(bios.cbegin(), bios.cend(), [&systemName](const BiosSystem& x) { return x.name == systemName; });
++	if (it == bios.cend())
++		return false;
+ 
+-	return std::async(std::launch::async, [sourceSystemName, systemName]
+-	{
+-		auto bios = ApiSystem::getInstance()->getBiosInformations(sourceSystemName);
+-		auto it = std::find_if(bios.cbegin(), bios.cend(), [&systemName](const BiosSystem& x) { return x.name == systemName; });
+-		if (it == bios.cend())
+-			return false;
+-
+-		return std::find_if(it->bios.cbegin(), it->bios.cend(), [](const BiosFile& x) { return x.status == "MISSING"; }) != it->bios.cend();
+-	}).share();
++	return std::find_if(it->bios.cbegin(), it->bios.cend(), [](const BiosFile& x) { return x.status == "MISSING"; }) != it->bios.cend();
+ }
+ 
+ void ViewController::promptMissingBios(FileData* game, LaunchGameOptions options, Vector3f center, Vector2f targetSize)
+@@ -575,11 +570,6 @@ void ViewController::launch(FileData* game, LaunchGameOptions options, Vector3f
+ 	else if (options.netPlayMode == DISABLED && Settings::getInstance()->getBool("NetPlayAutomaticallyCreateLobby"))
  		options.netPlayMode = SERVER;
  	
- 	// runs during the launch transition
-+	// No question about missing BIOS here: Retrobox's launcher checks them itself, for the
-+	// emulator the game runs with (which may not be the system's), and says what is missing.
- 	std::shared_future<bool> missingBios;
+-	// runs during the launch transition
+-	std::shared_future<bool> missingBios;
 -	if (allowCheckLaunchOptions)
 -		missingBios = checkMissingBiosAsync(game);
- 
+-
  	// stop zooming once the game art fills the screen, keeping its aspect ratio
  	float zoom = 1.0f;
+ 	if (targetSize.x() > 0 && targetSize.y() > 0)
+@@ -589,6 +579,14 @@ void ViewController::launch(FileData* game, LaunchGameOptions options, Vector3f
+ 	origCamera.translation() = -mCurrentView->getPosition();
+ 
+ 	center += mCurrentView->getPosition();
++
++	// Ask before starting the transition; accepting then launches it exactly once.
++	if (allowCheckLaunchOptions && hasMissingBios(game))
++	{
++		promptMissingBios(game, options, center, targetSize);
++		return;
++	}
++
+ 	stopAnimation(1); // make sure the fade in isn't still playing
+ 	mWindow->stopNotificationPopups(); // make sure we disable any existing info popup
+ 	mLockInput = true;
+@@ -629,14 +627,8 @@ void ViewController::launch(FileData* game, LaunchGameOptions options, Vector3f
+ 		// fade out, launch game, fade back in
+ 		auto fadeFunc = [this](float t) { mFadeOpacity = Math::lerp(0.0f, 1.0f, t); };
+ 
+-		setAnimation(new LambdaAnimation(fadeFunc, fadeDuration), 0, [this, game, fadeFunc, options, center, targetSize, missingBios]
++		setAnimation(new LambdaAnimation(fadeFunc, fadeDuration), 0, [this, game, fadeFunc, options]
+ 		{
+-			if (missingBios.valid() && missingBios.get())
+-			{
+-				setAnimation(new LambdaAnimation(fadeFunc, 800), 0, [this, game, options, center, targetSize] { GuiComponent::isLaunchTransitionRunning = false; mLockInput = false; mWindow->closeSplashScreen(); promptMissingBios(game, options, center, targetSize); }, true, 3);
+-				return;
+-			}
+-
+ 			if (doLaunchGame(game, options))
+ 			{
+ 				GuiComponent::isLaunchTransitionRunning = false;
+@@ -655,14 +647,8 @@ void ViewController::launch(FileData* game, LaunchGameOptions options, Vector3f
+ 	{
+ 		int slideDuration = (transition_style == "fast slide") ? 750 : 1500; // Halve the duration for fast slide
+ 		// move camera to zoom in on center + fade out, launch game, come back in
+-		setAnimation(new LaunchAnimation(mCamera, mFadeOpacity, center, slideDuration, zoom), 0, [this, origCamera, center, targetSize, zoom, game, options, missingBios]
++		setAnimation(new LaunchAnimation(mCamera, mFadeOpacity, center, slideDuration, zoom), 0, [this, origCamera, center, zoom, game, options]
+ 		{			
+-			if (missingBios.valid() && missingBios.get())
+-			{
+-				setAnimation(new LaunchAnimation(mCamera, origCamera, mFadeOpacity, center, 600, zoom), 0, [this, game, options, center, targetSize] { GuiComponent::isLaunchTransitionRunning = false; mLockInput = false; mWindow->closeSplashScreen(); promptMissingBios(game, options, center, targetSize); }, true, 3);
+-				return;
+-			}
+-
+ 			if (doLaunchGame(game, options))
+ 			{
+ 				GuiComponent::isLaunchTransitionRunning = false;
+@@ -679,14 +665,8 @@ void ViewController::launch(FileData* game, LaunchGameOptions options, Vector3f
+ 	} 
+ 	else // instant
+ 	{			
+-		setAnimation(new LaunchAnimation(mCamera, mFadeOpacity, center, 10, zoom), 0, [this, origCamera, center, targetSize, zoom, game, options, missingBios]
++		setAnimation(new LaunchAnimation(mCamera, mFadeOpacity, center, 10, zoom), 0, [this, origCamera, center, zoom, game, options]
+ 		{			
+-			if (missingBios.valid() && missingBios.get())
+-			{
+-				setAnimation(new LaunchAnimation(mCamera, origCamera, mFadeOpacity, center, 10, zoom), 0, [this, game, options, center, targetSize] { GuiComponent::isLaunchTransitionRunning = false; mLockInput = false; mWindow->closeSplashScreen(); promptMissingBios(game, options, center, targetSize); }, true, 3);
+-				return;
+-			}
+-
+ 			if (doLaunchGame(game, options))
+ 			{
+ 				GuiComponent::isLaunchTransitionRunning = false;
+diff --git a/es-app/src/views/ViewController.h b/es-app/src/views/ViewController.h
+index 1fb8f022fc058813b2af954c0c39e50a8b2a69a1..fb70e424939d60541c019f4a0c988c292380d84e 100644
+--- a/es-app/src/views/ViewController.h
++++ b/es-app/src/views/ViewController.h
+@@ -7,7 +7,6 @@
+ #include "GuiComponent.h"
+ #include <vector>
+ #include <functional>
+-#include <future>
+ 
+ class IGameListView;
+ class ISimpleGameListView;
+@@ -123,7 +122,7 @@ private:
+ 	void playViewTransition(bool forceImmediate);
+ 	bool doLaunchGame(FileData* game, LaunchGameOptions options);
+ 	bool checkLaunchOptions(FileData* game, LaunchGameOptions options, Vector3f center, Vector2f targetSize);
+-	std::shared_future<bool> checkMissingBiosAsync(FileData* game);
++	bool hasMissingBios(FileData* game);
+ 	void promptMissingBios(FileData* game, LaunchGameOptions options, Vector3f center, Vector2f targetSize);
+ 	int getSystemId(SystemData* system);
+ 	void changeVolume(int increment);
