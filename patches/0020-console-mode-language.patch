@@ -1,0 +1,201 @@
+diff --git a/es-app/src/ApiSystem.cpp b/es-app/src/ApiSystem.cpp
+index 3e5110c..36a56f8 100644
+--- a/es-app/src/ApiSystem.cpp
++++ b/es-app/src/ApiSystem.cpp
+@@ -2769,6 +2769,34 @@ std::pair<std::string, int> ApiSystem::setSystemKeyboard(const std::string& layo
+ 	return executeScript(getRetroboxSystemCommand() + " keyboard set \"" + layout + "\" \"" + variant + "\"", nullptr);
+ }
+ 
++std::vector<std::string> ApiSystem::getSystemLanguages()
++{
++	std::vector<std::string> languages;
++	for (auto line : executeEnumerationScript(getRetroboxSystemCommand() + " locale list"))
++	{
++		auto code = Utils::String::trim(line.substr(0, line.find(' ')));
++		if (!code.empty())
++			languages.push_back(code);
++	}
++	return languages;
++}
++
++std::string ApiSystem::getSystemLanguage()
++{
++	for (auto line : executeEnumerationScript(getRetroboxSystemCommand() + " locale get"))
++	{
++		auto code = Utils::String::trim(line);
++		if (!code.empty())
++			return code;
++	}
++	return "en_US";
++}
++
++std::pair<std::string, int> ApiSystem::setSystemLanguage(const std::string& language)
++{
++	return executeScript(getRetroboxSystemCommand() + " locale set \"" + language + "\"", nullptr);
++}
++
+ std::string ApiSystem::getCurrentTimezone()
+ {
+ 	LOG(LogInfo) << "ApiSystem::getCurrentTimezone";
+diff --git a/es-app/src/ApiSystem.h b/es-app/src/ApiSystem.h
+index 86ae3df..7336c90 100644
+--- a/es-app/src/ApiSystem.h
++++ b/es-app/src/ApiSystem.h
+@@ -394,6 +394,11 @@ public:
+ 	// both return the last output line (the reason, when it fails) and the exit status
+ 	std::pair<std::string, int> setSystemTimezone(const std::string& tz);
+ 	std::pair<std::string, int> setSystemKeyboard(const std::string& layout, const std::string& variant);
++	// retrobox: console mode's language (the system's locale): the languages the system
++	// has a locale for (es_ES...), the current one (en_US when none) and setting it
++	std::vector<std::string> getSystemLanguages();
++	std::string getSystemLanguage();
++	std::pair<std::string, int> setSystemLanguage(const std::string& language);
+ 
+ 	virtual std::vector<PadInfo> getPadsInfo();
+ 	virtual std::string getHostsName();
+diff --git a/es-app/src/guis/GuiMenu.cpp b/es-app/src/guis/GuiMenu.cpp
+index c254d77..16ab635 100644
+--- a/es-app/src/guis/GuiMenu.cpp
++++ b/es-app/src/guis/GuiMenu.cpp
+@@ -1441,53 +1441,101 @@ void GuiMenu::openSystemSettings()
+ 	if (language == "auto")
+ 		language.clear();
+ 
+-	language_choice->add(_("AUTO") + " (" + SystemConf::getInstance()->get("system.language") + ")", "auto", language.empty());
++	// retrobox: in console mode the language is the system's (its locale), which the system
++	// settings program reads and sets: only the languages the system has a locale for are
++	// offered, the system's is the one selected, and there is no "auto"
++	bool systemLanguage = false;
++	std::vector<std::string> systemLanguages;
++#if !WIN32
++	if (ApiSystem::getInstance()->hasConsoleSettings())
++	{
++		systemLanguages = ApiSystem::getInstance()->getSystemLanguages();
++		if (!systemLanguages.empty())
++		{
++			systemLanguage = true;
++			language = ApiSystem::getInstance()->getSystemLanguage();
++		}
++	}
++#endif
++
++	bool languageListed = false;
++	auto addLanguage = [&](const std::string& name, const std::string& code, bool selected)
++	{
++		if (systemLanguage && std::find(systemLanguages.cbegin(), systemLanguages.cend(), code) == systemLanguages.cend())
++			return;
++
++		if (systemLanguage)
++			selected = (code == language);
++
++		languageListed = languageListed || selected;
++		language_choice->add(name, code, selected);
++	};
++
++	if (!systemLanguage)
++		language_choice->add(_("AUTO") + " (" + SystemConf::getInstance()->get("system.language") + ")", "auto", language.empty());
+ 
+ 	if(EsLocale::isRTL()) {
+-	  language_choice->add("العربية", "ar_YE", language == "ar_YE");
++	  addLanguage("العربية", "ar_YE", language == "ar_YE");
+ 	} else {
+ 	  // force rtl processing
+-	  language_choice->add(Font::processRTLText("العربية"), "ar_YE", language == "ar_YE");
+-	}
+-	language_choice->add("CATALÀ",               "ca_ES", language == "ca_ES");
+-	language_choice->add("ČEŠTINA",                "cs_CZ", language == "cs_CZ");
+-	language_choice->add("CYMRAEG",              "cy_GB", language == "cy_GB");
+-	language_choice->add("DEUTSCH", 	     "de_DE", language == "de_DE");
+-	language_choice->add("ΕΛΛΗΝΙΚΆ",                "el_GR", language == "el_GR");
+-	language_choice->add("ENGLISH (US)", 	     "en_US", language == "en_US" || language == "en");
+-	language_choice->add("ENGLISH (UK)", 	     "en_GB", language == "en_GB");
+-	language_choice->add("ESPAÑOL", 	     "es_ES", language == "es_ES" || language == "es");
+-	language_choice->add("ESPAÑOL MEXICANO",     "es_MX", language == "es_MX");
+-	language_choice->add("EUSKARA",               "eu_ES", language == "eu_ES");
+-	language_choice->add("SUOMI",                "fi_FI", language == "fi_FI");
+-	language_choice->add("FRANÇAIS",             "fr_FR", language == "fr_FR" || language == "fr");
+-	language_choice->add("GALEGO",               "gl_ES", language == "gl_ES");
+-	language_choice->add(Font::processRTLText("עברית"), "he_IL", language == "he_IL");
+-	language_choice->add("HRVATSKI",            "hu_HU", language == "hu_HU");
+-	language_choice->add("BAHASA INDONESIA",     "id_ID", language == "id_ID");
+-	language_choice->add("ITALIANO",             "it_IT", language == "it_IT");
+-	language_choice->add("日本語", 	     "ja_JP", language == "ja_JP");
+-	language_choice->add("한국어",   	     "ko_KR", language == "ko_KR" || language == "ko");
+-	language_choice->add("NORSK BOKMÅL",     "nb_NO", language == "nb_NO");
+-	language_choice->add("NEDERLANDS",                "nl_NL", language == "nl_NL");
+-	language_choice->add("NORSK NYNORSK",            "nn_NO", language == "nn_NO");
+-	language_choice->add("OCCITAN",              "oc_FR", language == "oc_FR");
+-	language_choice->add("POLSKI",               "pl_PL", language == "pl_PL");
+-	language_choice->add("PORTUGUÊS BRASILEIRO", "pt_BR", language == "pt_BR");
+-	language_choice->add("PORTUGUÊS",   "pt_PT", language == "pt_PT");
+-	language_choice->add("ROMÂNĂ",               "ro_RO", language == "ro_RO");
+-	language_choice->add("РУССКИЙ",              "ru_RU", language == "ru_RU");
+-	language_choice->add("SLOVENČINA", 	     "sk_SK", language == "sk_SK");
+-	language_choice->add("SVENSKA", 	     "sv_SE", language == "sv_SE");
+-	language_choice->add("TÜRKÇE",  	     "tr_TR", language == "tr_TR");
+-	language_choice->add("УКРАЇНСЬКА",           "uk_UA", language == "uk_UA");
+-	language_choice->add("TIẾNG VIỆT",           "vi_VN", language == "vi_VN");
+-	language_choice->add("简体中文", 	     "zh_CN", language == "zh_CN");
+-	language_choice->add("正體中文", 	     "zh_TW", language == "zh_TW");
++	  addLanguage(Font::processRTLText("العربية"), "ar_YE", language == "ar_YE");
++	}
++	addLanguage("CATALÀ",               "ca_ES", language == "ca_ES");
++	addLanguage("ČEŠTINA",                "cs_CZ", language == "cs_CZ");
++	addLanguage("CYMRAEG",              "cy_GB", language == "cy_GB");
++	addLanguage("DEUTSCH", 	     "de_DE", language == "de_DE");
++	addLanguage("ΕΛΛΗΝΙΚΆ",                "el_GR", language == "el_GR");
++	addLanguage("ENGLISH (US)", 	     "en_US", language == "en_US" || language == "en");
++	addLanguage("ENGLISH (UK)", 	     "en_GB", language == "en_GB");
++	addLanguage("ESPAÑOL", 	     "es_ES", language == "es_ES" || language == "es");
++	addLanguage("ESPAÑOL MEXICANO",     "es_MX", language == "es_MX");
++	addLanguage("EUSKARA",               "eu_ES", language == "eu_ES");
++	addLanguage("SUOMI",                "fi_FI", language == "fi_FI");
++	addLanguage("FRANÇAIS",             "fr_FR", language == "fr_FR" || language == "fr");
++	addLanguage("GALEGO",               "gl_ES", language == "gl_ES");
++	addLanguage(Font::processRTLText("עברית"), "he_IL", language == "he_IL");
++	addLanguage("HRVATSKI",            "hu_HU", language == "hu_HU");
++	addLanguage("BAHASA INDONESIA",     "id_ID", language == "id_ID");
++	addLanguage("ITALIANO",             "it_IT", language == "it_IT");
++	addLanguage("日本語", 	     "ja_JP", language == "ja_JP");
++	addLanguage("한국어",   	     "ko_KR", language == "ko_KR" || language == "ko");
++	addLanguage("NORSK BOKMÅL",     "nb_NO", language == "nb_NO");
++	addLanguage("NEDERLANDS",                "nl_NL", language == "nl_NL");
++	addLanguage("NORSK NYNORSK",            "nn_NO", language == "nn_NO");
++	addLanguage("OCCITAN",              "oc_FR", language == "oc_FR");
++	addLanguage("POLSKI",               "pl_PL", language == "pl_PL");
++	addLanguage("PORTUGUÊS BRASILEIRO", "pt_BR", language == "pt_BR");
++	addLanguage("PORTUGUÊS",   "pt_PT", language == "pt_PT");
++	addLanguage("ROMÂNĂ",               "ro_RO", language == "ro_RO");
++	addLanguage("РУССКИЙ",              "ru_RU", language == "ru_RU");
++	addLanguage("SLOVENČINA", 	     "sk_SK", language == "sk_SK");
++	addLanguage("SVENSKA", 	     "sv_SE", language == "sv_SE");
++	addLanguage("TÜRKÇE",  	     "tr_TR", language == "tr_TR");
++	addLanguage("УКРАЇНСЬКА",           "uk_UA", language == "uk_UA");
++	addLanguage("TIẾNG VIỆT",           "vi_VN", language == "vi_VN");
++	addLanguage("简体中文", 	     "zh_CN", language == "zh_CN");
++	addLanguage("正體中文", 	     "zh_TW", language == "zh_TW");
++
++	// a system language EmulationStation has no translation for: shown by its code
++	if (systemLanguage && !languageListed)
++		language_choice->add(language, language, true);
+ 
+ 	s->addWithLabel(_("LANGUAGE (REGION)"), language_choice);
+-	s->addSaveFunc([window, language_choice, language, s]
++	s->addSaveFunc([window, language_choice, language, s, systemLanguage]
+ 	{
++		if (systemLanguage && language_choice->changed())
++		{
++			// the system's language first: the session starts with it again. EmulationStation
++			// takes it too, so that it changes when EmulationStation starts again
++			auto result = ApiSystem::getInstance()->setSystemLanguage(language_choice->getSelected());
++			if (result.second != 0)
++			{
++				window->pushGui(new GuiMsgBox(window, result.first, _("OK"), nullptr));
++				return;
++			}
++			s->setVariable("reboot", true);
++		}
++
+ 		if (language_choice->changed() && SystemConf::getInstance()->set("system.language", language_choice->getSelected()))
+ 		{
+ 			FileSorts::reset();
