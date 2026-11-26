@@ -10,12 +10,16 @@ external/id3v2lib
 external/libcheevos
 external/nanosvg
 external/pugixml
+external/qrcodegen
 
 # source files that carry a third-party copyright notice
+es-app/src/romm/RommPlatformsData.cpp
 es-app/src/services/httplib.h
 es-core/src/gettext.h
 es-core/src/utils/md5.cpp
 es-core/src/utils/md5.h
+es-core/src/utils/qrcodegen.cpp
+es-core/src/utils/qrcodegen.hpp
 es-core/src/utils/zip_file.hpp
 
 # fonts (resources/*.ttf, *.otf)

@@ -54,6 +54,20 @@ Files: es-app/src/services/httplib.h
 Copyright: 2020 Yuji Hirose
 License: MIT
 
+Files: external/qrcodegen/*
+       es-core/src/utils/qrcodegen.cpp
+       es-core/src/utils/qrcodegen.hpp
+Copyright: Project Nayuki
+License: MIT
+Comment: QR Code generator library (https://www.nayuki.io/page/qr-code-generator-library).
+
+Files: es-app/src/romm/RommPlatformsData.cpp
+Copyright: 2025 Brandon T. Kowalski, Grout Contributors
+License: MIT
+Comment:
+ Generated from Grout's cfw/batocera/data/platforms.json
+ (https://github.com/rommapp/grout).
+
 Files: es-core/src/utils/md5.cpp
        es-core/src/utils/md5.h
 Copyright: 1991-1992 RSA Data Security, Inc.
