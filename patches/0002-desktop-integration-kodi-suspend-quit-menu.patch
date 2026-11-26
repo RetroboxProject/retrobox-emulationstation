@@ -21,12 +21,12 @@ index 0ad2826..5162e9c 100644
  {
  	LOG(LogDebug) << "ApiSystem::launchKodi";
  
-+	// retrobox-launch has configgen write Kodi's controller configuration, as for any
-+	// game, and then run retrobox-kodi, which only starts the right Kodi
++	// retrobox-kodi-launch, not retrobox-launch: Kodi is a frontend, not a game, so it gets no
++	// game session and the overlay stays closed over it. It installs or updates Kodi if asked,
++	// writes its controller configuration and runs retrobox-kodi, which starts the right Kodi
  	std::string commandline = InputManager::getInstance()->configureEmulators();
 -	std::string command = "batocera-kodi " + commandline;
-+	std::string command = "\"" + retroboxScript("retrobox-launch") + "\" " + commandline +
-+		" -system apps -emulator kodi -core kodi -rom config";
++	std::string command = "\"" + retroboxScript("retrobox-kodi-launch") + "\" " + commandline;
  
  	ApiSystem::launchExternalWindow_before(window);
  
