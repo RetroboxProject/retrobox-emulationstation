@@ -19,14 +19,14 @@ diff --git a/es-app/src/FileData.cpp b/es-app/src/FileData.cpp
 index a660db3..129e505 100644
 --- a/es-app/src/FileData.cpp
 +++ b/es-app/src/FileData.cpp
-@@ -35,6 +35,7 @@
+@@ -39,6 +39,7 @@
  #include "resources/TextureData.h"
  #include "views/gamelist/GameNameFormatter.h"
  #include "watchers/WatchersManager.h"
 +#include "RetroboxMenuTheme.h"
- 
- using namespace Utils::Platform;
- 
+ #ifdef BATOCERA
+ #include "views/ViewController.h"
+ #include <mutex>
 @@ -714,6 +715,9 @@ bool FileData::launchGame(Window* window, LaunchGameOptions options)
  	if (command.empty())
  		return false;

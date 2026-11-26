@@ -1,18 +1,18 @@
 diff --git a/es-app/src/main.cpp b/es-app/src/main.cpp
-index 8fa3647..af0e7b2 100644
+index 62ed69d..7a28b56 100644
 --- a/es-app/src/main.cpp
 +++ b/es-app/src/main.cpp
-@@ -1,6 +1,9 @@
- //EmulationStation, a graphical front-end for ROM browsing. Created by Alec "Aloshi" Lofquist.
- //http://www.aloshi.com
- 
+@@ -7,6 +7,9 @@
+ #ifdef BATOCERA
+ #include "controlcenter/ControlCenterApp.h"
+ #endif
 +#if defined(__linux__)
 +#include <unistd.h>
 +#endif
  #include "services/HttpServerThread.h"
  #include "guis/GuiDetectDevice.h"
  #include "guis/GuiMsgBox.h"
-@@ -57,7 +60,23 @@ static bool enable_startup_game = true;
+@@ -69,7 +72,23 @@ static std::string gControlCenterScreen;
  
  bool parseArgs(int argc, char* argv[])
  {
